@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.xplay6.temproot"
+    android:versionCode="1"
+    android:versionName="1.6">
+
+    <!-- targetSdk 22: this device is API 23 and the app must keep the pre-M
+         behaviour for exec/load of its own files dir. -->
+    <uses-sdk
+        android:minSdkVersion="21"
+        android:targetSdkVersion="22" />
+
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <application
+        android:allowBackup="false"
+        android:label="月虹提权助手"
+        android:theme="@android:style/Theme.Material.NoActionBar">
+
+        <activity
+            android:name=".Main"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <receiver
+            android:name=".Boot"
+            android:directBootAware="false"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.QUICKBOOT_POWERON" />
+            </intent-filter>
+        </receiver>
+
+        <!-- exported so `adb shell am startservice` can drive it: that is both the
+             test hook and the fallback trigger if vivo's autostart manager blocks
+             BOOT_COMPLETED for this package. -->
+        <service
+            android:name=".EscService"
+            android:exported="true" />
+
+        <!-- the persisted-job boot trigger; BIND_JOB_SERVICE is what makes
+             JobScheduler allow this class to be started as a job. -->
+        <service
+            android:name=".BootJob"
+            android:exported="false"
+            android:permission="android.permission.BIND_JOB_SERVICE" />
+    </application>
+</manifest>

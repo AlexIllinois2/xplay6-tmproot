@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.xplay6.granted"
+    android:versionCode="1"
+    android:versionName="0.1">
+
+    <!-- A third-party-style app: no root code of its own.  It ships the same
+         client binary the manager ships, and its whole ability to get root is
+         whether TempRoot's allow list contains this app's uid. -->
+    <uses-sdk
+        android:minSdkVersion="21"
+        android:targetSdkVersion="22" />
+
+    <application
+        android:allowBackup="false"
+        android:label="GrantedDemo">
+        <activity
+            android:name=".Demo"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>
