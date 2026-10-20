@@ -1,0 +1,2 @@
+c88100e5409bfcdf44d761a6b278373c486cb3fbb097fd5e84a45b30f059287c  月虹提权助手-v1.9.12-release.apk
+7390b75701bb31d710a5d2ef2c9b85674deb71acb89c8a598d7d2fa28d43f484  月虹提权助手-v1.9.12-src-docs.tar.gz

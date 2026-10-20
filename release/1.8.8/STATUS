@@ -1,0 +1,1 @@
+superseded, never installed: carries the req-dir split for daemon+suc but the APK JNI probe still published into .sud (ledger 596)

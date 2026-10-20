@@ -17,6 +17,9 @@ public final class EscService extends Service {
      * serialize here rather than trusting the broadcast count. */
     private static volatile boolean busy = false;
 
+    /* How long the boot trigger waits before spending the needle (see onStartCommand). */
+    static final long SETTLE_MS = 150 * 1000L;
+
     @Override
     public IBinder onBind(Intent intent) {
         return null;
@@ -31,11 +34,45 @@ public final class EscService extends Service {
             stopSelf(id);
             return START_NOT_STICKY;
         }
+        /* The boot/job trigger must not fire the binder needle a second time on a boot that is already
+         * served: every attempt carries the leak loop's measured crash rate, and a second daemon would
+         * find 12345/12346 taken anyway.  The UI's 提权 button goes through Chain.run directly, so an
+         * explicit user retry is still possible. */
+        if (BootJob.alive(this)) {
+            Log.i("TempRoot-boot", "this boot already reads as escalated -- not firing the needle again");
+            /* "Already escalated" is about the daemon, not about the caller's door: relayd lives in this
+             * process, so a recycled process means a granted app can no longer reach su at all.
+             * Re-arm it here -- this is the branch every non-needle trigger lands in (ledger 631). */
+            Chain.ensureRelay(this, new Chain.Log() {
+                @Override
+                public void line(String s) {
+                    Log.i("TempRoot-boot", s);
+                }
+            });
+            BootJob.schedule(this, BootJob.CHECK_MS);
+            stopSelf(id);
+            return START_NOT_STICKY;
+        }
         busy = true;
         new Thread(new Runnable() {
             @Override
             public void run() {
                 try {
+                    /* The boot trigger fires while the whole phone is still booting (dex2oat, every
+                     * vendor service starting), which is exactly when kmalloc-512 churns fastest and the
+                     * freed slot the needle is hunting gets snatched -- measured on 1.8.4: the two
+                     * boot-triggered attempts both logged `L7: the needle never published a task`, while
+                     * every manual attempt at rest hit.  The chain itself is unchanged; it just waits
+                     * for the machine to quiet down before spending its one needle. */
+                    boolean bootTrigger = intent != null && "boot".equals(intent.getStringExtra("trigger"));
+                    if (bootTrigger) {
+                        Log.i("TempRoot-boot", "boot trigger: waiting for the boot storm to settle before the needle");
+                        try {
+                            Thread.sleep(SETTLE_MS);
+                        } catch (InterruptedException ie) {
+                            Log.i("TempRoot-boot", "settle wait interrupted");
+                        }
+                    }
                     Chain.run(EscService.this, new Chain.Log() {
                         @Override
                         public void line(String s) {
@@ -44,6 +81,21 @@ public final class EscService extends Service {
                     }, 24);
                 } finally {
                     busy = false;
+                    /* Tell it plainly when the vendor's autostart switch is not on for this package: the
+                     * escalation works (something woke us -- the broadcast, the job, adb or the user),
+                     * but the next reboot will need a hand unless 自启动 is allowed.  An uninstall +
+                     * reinstall resets that row, so this is a real state of the shipped app, not a
+                     * hypothetical. */
+                    try {
+                        long epoch = BootJob.bootEpoch();
+                        long saw = getSharedPreferences("temproot", 0).getLong("saw_boot", -1L);
+                        if (epoch > 0 && (saw < 0 || Math.abs(saw - epoch) > 120))
+                            Log.i("TempRoot-boot", "★ 本次开机没有被 BOOT_COMPLETED 唤醒（vivo 自启动未放行）"
+                                    + "——重启后要手点一次「提权」；i管家→权限管理→自启动 打开本应用即可，"
+                                    + "卸载重装后这个开关会回到关闭");
+                    } catch (Throwable t) {
+                        Log.i("TempRoot-boot", "autostart witness unavailable: " + t);
+                    }
                     /* Arm the persisted job from here rather than only from the UI: this
                      * is the one code path every trigger (boot job, broadcast, adb, the
                      * 提权 button) passes through, so the next boot is always covered. */

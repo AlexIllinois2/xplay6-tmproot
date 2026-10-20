@@ -1,0 +1,1 @@
+adds the canonical /sbin/su bind (K reported a zero-byte stub; see ledger 634). H judged GREEN on 1.9.9 (Enforcing + su channel grants root). G under POST_REBOOT=1 measured on THIS build -- see STATUS.

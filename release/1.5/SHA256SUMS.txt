@@ -1,0 +1,2 @@
+b737720dc44e8cf78f7ee45157eed8dd0fa8a2bcdde9281e3040d6adaca4338e  月虹提权助手-v1.5-release.apk
+99ea565997805e4ae5a703b19998d72e306f3fdd036c143a2e33ee567cbeb74d  月虹提权助手-v1.5-source.tar.gz

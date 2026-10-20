@@ -1,0 +1,4 @@
+built AND on-device verified for the relay path (third-party app reaches uid=0 through it, Enforcing kept);
+criteria B/C/D still report "no ruler" because the harness's cold-start of the demo app is not gated on
+ThisTime>0 -- the delivery path itself is measured by hand (art/ledger-20261016.md 630), the harness fix is owed.
+G under POST_REBOOT=1 has NOT been re-measured on 1.9.8.

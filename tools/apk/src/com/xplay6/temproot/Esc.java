@@ -28,6 +28,33 @@ public final class Esc {
     /** Write the gate's original instruction back, leaving the shipped behaviour. */
     public static native String nativeSugateRevert();
 
+    /** 3.18.31 (Android 7.1.1) version of the same two writes, split so the window witness can be
+     *  read by the caller.  The site there is the one instruction that *consumes* the gate's verdict
+     *  (`tbnz` in do_execveat_common), so the word written is a NOP; the window is proven by moving
+     *  the /proc/sys/kernel/modprobe string through the alias, because this kernel exposes no
+     *  selinux_enforcing symbol -- and this uid only reads that file thanks to the exemption planted
+     *  earlier in the same run, so the witness goes through the root channel instead.
+     *
+     *  Call order, with nothing written to .text unless every step is witnessed:
+     *    nativeSugate7Open()    plant the alias, move the string to "/zz"
+     *    -> read /proc/sys/kernel/modprobe as root: must be "/zz", else nativeSugate7Abort(orig)
+     *    nativeSugate7Restore(orig)  put the read path back through the alias
+     *    -> read it again: must equal orig, else nativeSugate7Abort(orig)
+     *    nativeSugate7Patch()   the NOP, then witness by execve'ing a file literally named su.
+     *  Open: 0 alias planted and witness written, -1 entry write missed, -2 witness write missed.
+     *  Restore/Abort: 0 written, <0 refused or missed.  Patch: 0 ok, -3 missed (word rolled back),
+     *  -4 missed and the rollback missed too. */
+    public static native String nativeSugate7Open();
+
+    public static native String nativeSugate7Restore(String origModprobePath);
+
+    public static native String nativeSugate7Patch();
+
+    public static native String nativeSugate7Abort(String origModprobePath);
+
+    /** Put 7's verdict branch back exactly as shipped. */
+    public static native String nativeSugate7Revert();
+
     /** Reverse-direction su request: native code listens, the daemon connects back,
      *  and the uid it reads comes from SCM_CREDENTIALS.  Java cannot receive
      *  ancillary credentials, so this has to live in the .so. */

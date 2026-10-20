@@ -1,0 +1,82 @@
+SHIPPED BUILD, PACKAGED 2026-10-20 18:24 (device clock +11 min at read time) -- Android 7.1.1 (PD1610, NMF26F release-keys), kernel 3.18.31-perf-g9dce1fbc9, versionCode 38, versionName 1.9.17 (read from dumpsys on the device that ran this boot).
+MAIN-MODE TABLE JUDGED GREEN ON THIS BUILD, ON ITS OWN COLD BOOT: coverage 16/16, pass=16, fail=0, refused=0 -> "APP ESCALATION + AUTHORIZATION VERIFIED".
+  B C L D           unlisted app -> `SUX out=ERR unknown service`; listed -> `SUX out=uid=0(root)`;
+                    L = the same granted app under the literal name `su` -> `SU out=uid=0(root)`;
+                    revocation live one request later.  Each of these now runs behind a read-back
+                    barrier with real readings: `barrier: 10134 is gone from the list the relay reads`,
+                    `barrier: 10134 IS listed before the relaunch`.
+  A1 A2 E1 E2 F0 F  self-escalation witnessed in its own cred, both decisions in the audit trail,
+                    a granted caller cannot take another uid.
+  I I2 J JP K K2    the daemon's state dir stays closed to callers while their own drop still works,
+                    a caller-planted grants list is not believed, the su-named paths are real binaries,
+                    and exec by the NAME su is admitted (K2 read: `ERR unknown service` = admitted by
+                    the kernel guard, refused by the authorization layer -- the user's actual complaint).
+  G / H             BOTH JUDGED GREEN on a second boot of this same package (ledger 680):
+                    POST_REBOOT=1      `post-reboot: uid=2000 enforce=Enforcing sud-procs=0 listeners=0`
+                                       -> PASS G, "REVERSIBILITY VERIFIED"
+                    EXPECT_ENFORCING=1 coverage 17/17, pass=17 fail=0 refused=0, and
+                                       PASS H  paired same-instant reading
+                                       `enforce=Enforcing` + `reply=uid=0(root) ... context=u:r:init:s0`
+                    Total for this build across its two boots: 16 main + G + H = 18 criteria, all judged.
+TIMING, STATED HONESTLY: on that second boot the harness's own section-0 line read `2000 Permissive`
+  while H, a few minutes later in the same run, read `Enforcing`.  Route 7 flips enforcing back only
+  after the daemon is up, so "getenforce is Enforcing immediately after escalation" is NOT a property
+  this delivery claims -- what is measured is: permissive briefly, then it returns by itself, and H is
+  judged from the returned state.
+
+THE USER'S OWN SENTENCE, WALKED IN THE APP, ON THIS BUILD, NO KERNEL NEEDLE SPENT FOR IT:
+  Shizuku launched -> its card reads `启动（针对已 root 设备）` (it found a usable su by itself) ->
+  tapped 启动 with `uinput_tap 255 1173` through the daemon's root channel ->
+  `ps`: `root 6640 1 ... S shizuku_server` (uid 0, ppid 1), with `allow uid=10133 ... target=0 code=0`
+  lines in the daemon's audit log at the same time.
+  snub (uid 10135): `allow uid=10135 pid=22181/22298 target=0 code=0` are in the same log, but that file
+  carries no timestamps and survives reboots, so those two lines are NOT attributed to this boot -- the
+  boot-attributed half for a third-party uid under the literal name is criterion L.
+  Repeated on the second boot (the one that judged G and H), same package, same two taps:
+  `monkey` launch -> root card -> `uinput_tap 255 1173` -> `root 6250 1 ... S shizuku_server`.  So the
+  result is not a one-boot fluke; and note what the owner has to do after a reboot: open Shizuku and
+  tap 启动 once (the phone needs no computer for that, the chain has already opened the gate by then).
+
+WHAT THIS BUILD ADDS OVER 1.9.16
+  `selfGrant` no longer treats "I could not read the list" as "the list is empty".  It calls
+  `readGrantsOrNull`, and a failed read is refused with the errno carried into the log line
+  (`why=...`).  Why that is a safety fix and not cosmetics: in 1.9.16 the boot path read the list as
+  empty (it logged `added`) and was about to write back a one-entry list -- the owner's Shizuku/snub
+  entries survived only because the unlink also failed at that moment.  Same build also carries the
+  full-64-byte modprobe_path restore and the four-way gate entry points from 1.9.16.
+  Boot reading from this package, before and after: `self-grant uid=10151 resealed saved=true
+  list=[10151, 10133, 10135] why=-`, then `window PROVEN through the alias: "/sbin/modprobe" -> "/zz"`,
+  `restore witnessed`, only then `sugate7 patch: rc=0 (NOP at 0x323400)`, then `app-exec su: execve
+  allowed`.  One needle this boot, spent by the boot trigger itself, no adb-side writes involved.
+
+WHY THE BOOT PATH NOW READS ITS OWN LIST AT ALL (mechanism, measured as a single-factor A/B over two
+  boots -- ledger 677): the previous boot's file was the inode the harness created with `mv` as root
+  (`u0_a151:root` + `app_data_file:s0`, missing the app's MLS categories), and an enforcing appdomain
+  can neither read nor unlink it.  Restoring the app's own shape (`chown uid:gid` + `restorecon`) made
+  the identical chain read three lines and reseal.  The harness is fixed to match: `drop_demo` rewrites
+  in place (`cat >`, so inode/owner/label never change) and `seal_grants` restores the group and runs
+  `restorecon`.  After a full 16-line run on this build the file still reads `u0_a151:u0_a151` +
+  `app_data_file:s0:c512,c768`, 18 bytes, three lines.
+
+BOUNDS AND LIMITS
+  * Memory-only: bootloader never unlocked, no partition written, `adb reboot` restores the vendor name
+    gate, removes /sbin/su and the daemon (criterion G measures exactly that).
+  * One kernel needle per boot at most; the boot trigger does not re-fire on a boot already served
+    (this boot logged `this boot already reads as escalated -- not firing the needle again` when the
+    service was started again by hand, and that is the intended behaviour).
+  * `job schedule rc=1` on this ROM: JobScheduler refuses the re-check job, so if relayd dies it is not
+    re-armed by the scheduler -- it comes back when the app starts again or when 提权 is tapped.
+  * A process that is already root is refused by the relay (`deny uid=0 cmd=SU 0 id`): the allow list
+    covers app uids, and root does not need to be handed root.
+  * The 6.0.1 route (`esc_sugate`) still keeps the older shape -- if its own enforce read is not
+    available it patches and relies on the exec witness (clobber.c:898).  Unchanged here because this
+    phone runs 7 and that branch cannot be witnessed on it.
+  * Byte policy: every byte of this package has a reading from the boot above -- `classes.dex`,
+    `lib/arm64-v8a/libesc.so` and `assets/broot7` are the freshly built ones that actually ran (cmp
+    against tools/), unlike 1.9.16, which shipped 1.9.15's broot7 on purpose.
+
+VERIFY IT YOURSELF
+  bash tools/verify_approot.sh <serial>                    # the 16-line table above
+  POST_REBOOT=1 bash tools/verify_approot.sh <serial>      # criterion G
+  EXPECT_ENFORCING=1 bash tools/verify_approot.sh <serial> # criterion H
+  Ledger trail: art/ledger-20261016.md sections 664, 670, 675, 676, 677, 678.

@@ -1,0 +1,8 @@
+SHIPPED BUILD VERIFIED ON THE DEVICE (versionCode 33 / 1.9.12, Android 7.1.1 PD1610_D_7.12.15, 3.18.31-perf-g9dce1fbc9):
+  main mode:        pass=13 fail=0 refused=1(JP, structural boundary behind the relay) coverage 14/14
+  POST_REBOOT=1:    PASS G (reboot -> uid 2000, no persisted su; app re-escalated itself; @sud listener back)
+  EXPECT_ENFORCING: PASS H (Enforcing kept AND the su channel grants root)
+Third-party root is judged green on this build (C: granted app runs as root; B/D/J: refusals live; E1/E2: both decisions audited), the PATH names /sbin/su and /sbin/sux are published by the app own chain run (criterion K: 0 stubs).
+LIMIT on the PATH face, measured 2026-10-20 on this boot (ledger 643, retracts the old ledger 636 claim): the vendor su-NAME gate blocks an execve whose path ends in exactly "su" for EVERY non-zero cred, app domains included -- same bytes in the same dir: files/su -> error=1 EPERM, files/sux -> rc=0, and uid 0 -> runs. So on THAT build an app that hardcodes "su" (Shizuku, libsu-based) could not reach root; our own C criterion passed only because its client is named sux.  SUPERSEDED for 7 by release/1.9.15 -- the boot chain now opens this gate in RAM (site: the `tbnz` that consumes the gate verdict in do_execveat_common, NOPped through an empty-pgd-slot alias; ledger 664/670/672), measured with `app-exec su: execve allowed` and `control_su: errno=1 -> RAN` after a cold reboot.
+Product semantics agreed with the user: recovery from a mid-boot daemon death is reboot or a hand on the escalate button (one recovery needle per boot at most, then it says so).
+Never unlocked the bootloader, never wrote a partition; memory-only root.

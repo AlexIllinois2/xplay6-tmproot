@@ -54,7 +54,7 @@ static int tcp_channel(void)
  * with SCM_CREDENTIALS, which the kernel fills in from the sending task, so the
  * uid the grant list is checked against cannot be forged by an unprivileged app.
  */
-#define REQ_DIR "/data/local/tmp/.sud"
+#define REQ_DIR "/data/local/tmp/.sud/req"
 
 static int peer_channel(const char *req, int timeout_ms)
 {
@@ -87,7 +87,7 @@ static int peer_channel(const char *req, int timeout_ms)
         close(ls);
         return -1;
     }
-    mkdir(REQ_DIR, 0777);
+    mkdir(REQ_DIR, 01777);   /* best effort: the daemon owns this dir and re-modes it each start */
     snprintf(path, sizeof path, "%s/req-%d", REQ_DIR, getpid());
     fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
     if (fd < 0) {

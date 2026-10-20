@@ -1,0 +1,2 @@
+third-party su channel judged GREEN by the harness on 7: PASS A1 A2 B C D + E1/E2 (C = granted app runs as root, through relayd @sud, Enforcing kept).
+Owed: POST_REBOOT=1 (G) and EXPECT_ENFORCING=1 (H) re-runs on this build; FAIL K stub path not yet named. (ledger 632-633)

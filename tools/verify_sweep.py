@@ -18,6 +18,10 @@ import subprocess
 import sys
 import time
 
+import os
+SU = os.environ.get("SU", "su")  # SU=sux on 7.1.1: the vendor gate refuses execve of a path whose last component is "su" (ledger 579)
+
+
 FAILS = []
 
 
@@ -50,7 +54,7 @@ def num(out, key):
 
 
 def main():
-    if not sh('su -c "id -u"').strip().startswith('0'):
+    if not sh(f'{SU} -c "id -u"').strip().startswith('0'):
         print('ABORT: su as shell does not work (gate not patched?)')
         return 2
     if '0' not in rsh('id -u').split():
@@ -59,7 +63,7 @@ def main():
 
     # -- 1: the decision is recorded at decision time ------------------------------
     before = rsh('tail -20 /data/local/tmp/.sud/sud.log')
-    sh('su -c "id -u"')
+    sh(f'{SU} -c "id -u"')
     time.sleep(1)
     after = rsh('tail -20 /data/local/tmp/.sud/sud.log')
     new = [l for l in after.split('\n') if l and l not in before]
@@ -71,7 +75,7 @@ def main():
     # -- 3: no zombie accumulation -------------------------------------------------
     z0 = rsh('sh /data/local/tmp/sweep_root.sh zombies')
     for _ in range(3):
-        sh('su -c "true"')
+        sh(f'{SU} -c "true"')
     for _ in range(3):
         sh('printf "true\\nexit\\n" | su')
     time.sleep(2)
@@ -84,7 +88,7 @@ def main():
     # `su -c "sleep 120"` is registered by dispatch_su and stays open for two
     # minutes, so the session under test needs no detached script (an earlier draft
     # used `nohup ... &` and the holder never survived adb's controlling terminal).
-    holder = subprocess.Popen(['adb', 'shell', 'su -c "sleep 120"'],
+    holder = subprocess.Popen(['adb', 'shell', f'{SU} -c "sleep 120"'],
                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     time.sleep(4)
     reg = rsh('for f in /data/local/tmp/.sud/sess/*; do test -f "$f" && '
@@ -121,8 +125,8 @@ def main():
     if not gone:
         holder.kill()
     time.sleep(1)
-    check('2f grant restored -> su works again', sh('su -c "id -u"').strip().startswith('0'),
-          'id -u -> ' + sh('su -c "id -u"').strip())
+    check('2f grant restored -> su works again', sh(f'{SU} -c "id -u"').strip().startswith('0'),
+          'id -u -> ' + sh(f'{SU} -c "id -u"').strip())
 
     # -- 4: the interactive shell is INCREMENTAL (Shizuku's handshake) --------------
     # Shizuku writes `echo SHELL_TEST` into `su` and blocks until that exact line

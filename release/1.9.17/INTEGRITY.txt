@@ -1,0 +1,31 @@
+# 从解开的树根运行：sha256sum -c --ignore-missing release/1.9.17/INTEGRITY.txt（B 段两枚镜像不在包里，故 --ignore-missing）
+# INTEGRITY -- v1.9.17 归档包的逐字节对账
+# A) 包内关键件（下面这些无 # 前缀的行就是校验行，`sha256sum -c` 直接吃本文件）：
+6e08b12f524720ff5261c2901d67a21c1017f537682cb909e48a91518227d9a9  release/1.9.17/月虹提权助手-v1.9.17-release.apk
+9bbc40c14755cc2ce6bc1341110b2d972f113316138ecec8239b322f05aca64d  tools/clobber.c
+00d069126229940cc10480e6a8e1addf5ca51e552fed0f25be27a18acbbfcb7e  tools/apk/jni/jni_esc.c
+bf9db2b9df8f1341fa985ebe7c3addf887a557e07ef4744f318b01ccdeb87f58  tools/apk/src/com/xplay6/temproot/Chain.java
+08e40c5002012db8e156cafe61c53ce0a8e5fa41f0a1dffb042a158a6c28ff94  tools/apk/src/com/xplay6/temproot/Esc.java
+6f478d8745a40ae41002e2d8c4e0f318d4245ff2b20b5e82364ca2641ae66e3d  tools/apk/src/com/xplay6/temproot/BootJob.java
+75110ce806a378215e5fa6a034a46cb7ea7da303470625bf777e3a49adbbfaff  tools/sud.c
+8130a150d43b8f7a0eb21fe9fcc3c44ca6d814eae513278807a416f6e9fd0c6c  tools/relayd.c
+ed6ebc2aa69698cffdf5ad233c41f93f165388919cac421aa7b5c3997970ec81  tools/broot7.c
+281cc7a5e7ae0bc44628f7acda8f25d5b749609966cf25cba7adaad991f53342  tools/suc.c
+38da7562ada5a8f080f010d49e5f3976678f28ecc4865e5d3105b16bd034d265  tools/nsmbind.c
+00eabcea626a378b579933c89d64eb4486175c7171557d066fdd898381e022da  tools/pgdalias.py
+62c4540ce79723a41aedd54d37d9fc25e0a7579c6fe9656d314b59fa1308fbe9  tools/gate_constants.py
+ea6cf01937b3abedb5b4b1d08f77585d51794e57ef5e589fc77a7b4d79af1d74  tools/verify_approot.sh
+919576da146b66cd21e31aed843dffc7ac00eec2c94746a0f383845ea87b58e2  tools/rehearse_sugate.sh
+53b899824ff4d661853e563ed341e5522ba116825a6d79ed8c5b9dd3229e5dd4  art/kallsyms-7-real.txt
+e623d5d0f2053f21c52f8b953acd17335a28e5749ce7c260e854261a77e5d512  art/kallsyms_real.txt
+
+# B) 不在包里（机主选择瘦包）。这两枚是 tools/pgdalias.py 与构建入口那道闸的权威依据；自己从同 ROM 的
+#    boot.img 取出 kernel 后，必须与下面两行逐字节相同，否则站点推导就没有意义（镜像不同＝地址不同）。
+293629ef13199a74beda358d8c45d23a82564582e9a032ab8681def5b1ab7002  fw/7/Image
+a6cfa5b05cdb1230ffc26ac0b38150cf25bf3db1fc248a6512122f419cfb20f4  fw/Image
+
+#    拿到镜像后先跑这两条，它们会自己说不说话：
+#      python3 tools/pgdalias.py --profile 7        （站点 0xffffffc000323400 的四项现读断言）
+#      python3 tools/gate_constants.py --selftest   （14 对比较 + 6 枚臂）
+
+# C) 归档包本身的 sha256 见同目录 ARCHIVE-SHA256.txt（在 tar 外面，随包一起发）。

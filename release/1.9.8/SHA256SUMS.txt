@@ -1,0 +1,2 @@
+0ace9bcbe5721bd43c325352d430a927c0b304e5a72e399dd0484ad946409f69  release/1.9.8/月虹提权助手-v1.9.8-release.apk
+e05d4025586ba2a91ccf477c94ba3a68a8003160c43ba0d543ff760684e44bc9  release/1.9.8/temproot-1.9.8-src.tar

@@ -1,0 +1,86 @@
+SHIPPED BUILD, PACKAGED 2026-10-20 17:33 (device clock +11 min at read time) -- Android 7.1.1 (PD1610, NMF26F release-keys), kernel 3.18.31-perf-g9dce1fbc9, versionCode 37.
+MAIN-MODE TABLE IS FULLY JUDGED AND GREEN (16/16, fail=0, refused=0) ON THIS BUILD, ON A COLD BOOT WHERE NOTHING TOUCHED THE PHONE FROM ADB.
+  summary line      coverage: 16/16 criteria reported (mode=main) / pass=16 fail=0 refused=0
+                    -> "APP ESCALATION + AUTHORIZATION VERIFIED"
+  A1 A2             PASS  this boot's own task turned root inside its own cred; the app's probe reached uid=0
+  B  C  L  D        PASS  unlisted -> `SUX out=ERR unknown service`; listed -> `SUX out=uid=0(root)`;
+                          **L** = the SAME granted app under the literal name `su` -> `SU out=uid=0(root)`;
+                          revoking the uid is live one request later (no restart of anything)
+  E1 E2 F0 F        PASS  both decisions in the audit log; a granted caller cannot ask for somebody else's uid
+  I  I2 J  JP       PASS  callers cannot plant/replace files in .sud, can still use their own drop dir,
+                          and a caller-owned grants list is not believed while a root-owned one is
+  K  K2             PASS  the su-named path entries are real binaries, and exec by the NAME su is admitted
+                          (K2 reads `ERR unknown service` = exec allowed, the authorization layer refusing --
+                          the half the request "shizuku检测不到root" was actually about)
+  G / H             their own modes: POST_REBOOT=1 (PASS G, "REVERSIBILITY VERIFIED") and
+                    EXPECT_ENFORCING=1 (H); in main mode they are reported, not asserted.
+
+WHAT THIS BUILD CHANGES (1.9.15 -> 1.9.16), all of it about the su-name-gate patch:
+  1. The 7 route's window witness moved BEFORE the .text write.  `esc_sugate7` is now four entry
+     points that only write -- `open` (plant the 1 GB alias in the empty pgd slot, move
+     /proc/sys/kernel/modprobe to "/zz" through it), `restore`, `patch`, `abort` -- and the READS are
+     done by the caller over the daemon's root channel.  If either witness fails, `abort` puts the
+     string back at the REAL VA and not one byte of .text is written.  1.9.15 patched anyway when its
+     own in-process read failed, which is the rule "no read-back, no write" broken (ledger 676).
+     Cold-boot reading from the shipped chain, no adb input:
+        sugate7 open: rc=0   alias entry 0xffffffc001f4cff8 rc=1   witness write 0xffffffffc1a499b8 rc=1
+        window PROVEN through the alias: modprobe_path "/sbin/modprobe" -> "/zz"
+        sugate7 restore: rc=0   (writes the full 64-byte modprobe_path, zero-padded)
+        restore witnessed: "/sbin/modprobe" came back through the alias, both directions proven
+        sugate7 patch: rc=0   addr 0xffffffffc0323400 (= 0xffffffc000323400 via alias), NOP at 0x323400
+        app-exec su: execve allowed   ->  one needle this boot (broot7 attempt 1 rc=0), and that is the budget
+  2. `restore`/`abort` write the whole char[64] instead of strlen+1: "/zz" truncates the printed path
+     but leaves the tail bytes, so restoring only the head can leave a stale tail.
+  3. The acceptance harness's grants barrier was blind and is now not: `adb shell cat` on app-private
+     data is Permission denied, so the old `grants_until` always read empty, spun its timeout and let
+     the verdicts pass on timing alone.  It now reads through the root channel with a `GRANTS_EOF`
+     sentinel (so "channel did not answer" is separate from "list is empty"), and a barrier that never
+     confirmed turns its criterion into REFUSED instead of a footnote next to a PASS.
+  4. Three stale statements corrected where they were written (Chain.openSuName7's comment, this
+     release's predecessor STATUS, project memory): "the gate's switch has not been located on
+     3.18.31", "no kernel address is written here", "the app cannot read /proc/sys/kernel/modprobe".
+     The last one was never a reading -- the shipped chain's own log shows the in-process read working.
+
+KNOWN DEFECT IN THIS PACKAGE (measured, not hidden):
+  * At boot, `selfGrant` logs `self-grant uid=10151 added saved=false` -- the list read returns empty
+    and the write then fails at unlink, so the allow list is NOT damaged.  Long-standing: the same line
+    appears on earlier boots (ledger 5062/5181 sections).  What it means for THIS build is worse than a
+    log wart: 1.9.16 treats "could not read" as "empty list", so the owner's third-party entries
+    (Shizuku 10133, snub 10135) survive the boot self-grant only because the unlink happens to fail.
+    1.9.17 (vc38, built and installed, awaiting its own boot reading) separates the two --
+    `readGrantsOrNull` returns null for a failed read -- and refuses to rewrite with the errno logged.
+  * MECHANISM OF THE BOOT-TIME FAILURE, NAMED THE SAME DAY (ledger 677, single-factor A/B across two
+    boots): the inode the acceptance harness left behind was made by root (`grep > x.t; mv x.t list`),
+    and inside app data that inode arrives WITHOUT the app's MLS categories -- `u0_a151:root` +
+    `app_data_file:s0` instead of `u0_a151:u0_a151` + `...:s0:c512,c768`.  With enforcing up, that
+    appdomain can neither read the file nor unlink it, which is exactly `added saved=false`.  Restoring
+    the shape (chown uid AND group, then `restorecon`) made the next boot's identical chain log
+    `self-grant uid=10151 resealed saved=true list=[10151, 10133, 10135] why=-`.
+    A mid-boot `saved=true` seen from the app's own 撤销全部 button does NOT contradict this: it was
+    tapped after broot7 had planted the permissive-map exemption, i.e. inside a window we opened
+    ourselves.  Judge the shape only from the un-escalated side.
+  * The harness that created the bad shape is fixed in the same commit: `drop_demo` now rewrites the
+    list in place (`cat >`, inode/owner/label untouched) and `seal_grants` restores the group and runs
+    `restorecon`.
+
+BOUNDS AND LIMITS OF THIS DELIVERY
+  * Memory-only.  Bootloader never unlocked, no partition written; `adb reboot` restores the vendor
+    name gate, drops /sbin/su and the daemon, and the harness's G criterion measures exactly that.
+  * One kernel needle per boot at most; the boot trigger does not re-fire the needle on a boot that is
+    already served.
+  * `job schedule rc=1` on this ROM: JobScheduler refuses the re-check job, so if relayd dies it is not
+    re-armed by the scheduler -- re-arming happens when the app process starts again or when 提权 is
+    tapped.  Recorded as a product boundary, not a defect to fix in this route.
+  * The 6.0.1 route (`esc_sugate`) still keeps the older shape: when its own enforce read is not
+    available it patches and relies on the exec witness (clobber.c:898).  Unchanged in this build
+    because this phone is running 7 and that branch cannot be witnessed here.
+  * Byte policy of this package: `assets/broot7` is byte-identical to 1.9.15's (cmp), the binary that
+    has actually booted and escalated; `classes.dex` and `lib/arm64-v8a/libesc.so` are byte-identical
+    to the artifact measured on the boot above (cmp).  A freshly relinked broot7 (+520 B, five extra
+    `sugate7*` symbols broot7 never calls) was deliberately NOT shipped.
+
+VERIFY IT YOURSELF
+  bash tools/verify_approot.sh <serial>              # the 16-line table above
+  POST_REBOOT=1 bash tools/verify_approot.sh <serial> # requires criterion G (reboot restores factory)
+  EXPECT_ENFORCING=1 bash tools/verify_approot.sh <serial> # requires criterion H (root with Enforcing up)
+  Ledger trail: art/ledger-20261016.md sections 664, 670, 673, 675, 676.
