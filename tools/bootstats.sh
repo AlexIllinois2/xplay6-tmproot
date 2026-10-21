@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SU names the privileged-exec client.  The official 7.1.1 firmware refuses execve of any path # whose last component is exactly "su" (ledger 579), so on that machine run these tools with SU=sux.
+SU=${SU:-su}
 # How reliable is "boot -> root, no human"?  Reboot N times and record, per cycle:
 #   device_up   seconds until adb reports the device again
 #   root_at     seconds until `su -c id -u` answers 0 (0 = never within the budget)
@@ -25,7 +27,7 @@ for i in $(seq 1 "$N"); do
 	done
 	root=0
 	for b in $(seq 1 "$BUDGET"); do
-		r=$(adb shell 'su -c "id -u"' 2>/dev/null | tr -d '\000\r' | grep -aE '^[0-9]+$')
+		r=$(adb shell "$SU -c 'id -u'" 2>/dev/null | tr -d '\000\r' | grep -aE '^[0-9]+$')
 		if [ "$r" = 0 ]; then
 			root=$((b * 10))
 			break
@@ -36,7 +38,7 @@ for i in $(seq 1 "$N"); do
 	att=$(printf '%s\n' "$last" | sed -n 's/.*sugate attempt \([0-9]*\).*/\1/p')
 	gok=$(printf '%s\n' "$last" | grep -ac "rc=0" || true)
 	tries=$(adb shell 'logcat -d 2>/dev/null | grep -ac "sugate attempt"' 2>/dev/null | tr -d '\000\r' | grep -aE '^[0-9]+$')
-	path=$(adb shell 'su -c "command -v su"' 2>/dev/null | tr -d '\000\r' | grep -ac "/su" || true)
+	path=$(adb shell "$SU -c 'command -v su'" 2>/dev/null | tr -d '\000\r' | grep -ac "/su" || true)
 	line="cycle=$i device_up=${up}s root_at=${root}s landed_on_attempt=${att:-?} gate_ok=$gok attempts_logged=${tries:-0} su_on_path=$path"
 	printf '%s\n' "$line" | tee -a "$OUT"
 done

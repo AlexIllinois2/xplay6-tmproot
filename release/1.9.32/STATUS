@@ -1,0 +1,37 @@
+STATUS 1.9.32 —— 「提权后显示 root 可用，但 snub / Shizuku 用不了高权限」的修复版
+取证正文＝`art/ledger-20261021.md` §707–§715。判据面全部设备现读（serial 3e5a38a5・PD1610・7.1.1・Enforcing）。
+
+真因（§707）
+  per-domain permissive 只按 scontext 的「型」判；binder 的**回包方向**由对端（servicemanager / system_server /
+  init / untrusted_app …）决定。只豁免自家那几个域时，root 侧自己的调用全绿，而任何需要服务回包的调用
+  （Shizuku 的 PackageManager 查询、snub 的冻结）都死在 DeadObjectException。
+
+VERIFIED
+  1 构建可复现  `bash tools/apk/build.sh` rc=0；入口两道豁免闸真跑（源码 vs 活策略・`--verify-apk` 查包内数组），未用 SKIP_GATE。
+    aapt 现读 `versionCode=52 versionName=1.9.32`；包内 `assets/broot7` sha256 `301a0faa…` 与 `tools/broot7` 逐字节同。
+  2 点位集合闭合（7 枚）  kernel 192 / qti_init_shell 279 / init 593 / untrusted_app 743 / shell 1083 /
+    servicemanager 1156 / system_server 9。broot7 自证 `P7: every wanted type reads exempt AND nothing of the vendor's was dropped`。
+    解码式（§710）已修正为 `ebmp_maps_word`，主机臂 `check_units_view` 四档＋变异复刻设备读数。
+  3 整机主模式验收表（最终脚本重跑）  `EXPECT_ENFORCING=1 bash tools/verify_approot.sh` →
+    `coverage: 19/19 criteria reported (mode=main)`・`pass=19 fail=0 refused=0` → `APP ESCALATION + AUTHORIZATION VERIFIED`。
+    逐臂 A1 A2 B C L D E1 E2 F0 F H M M0 I I2 J JP K2 K 全 PASS；留底 `art/approot-1.9.32-main.txt`。
+  4 binder 回包方向实测（M/M0）  root 侧 `service check cpuinfo`＝found、`pm list packages -3` 出包名；
+    同发 `adb shell` 的 `service check cpuinfo`＝found 作正控（证明尺能看见 found）。
+  5 Shizuku 自己的读数  `/proc/10015`：`Uid=0000`・`u:r:init:s0`・`ppid=1`・`exe=/system/bin/app_process64`；
+    界面（uiautomator dump）`Shizuku 正在运行`・`版本 13.6，root`。
+    ★`service check shizuku` 恒为 `not found`（Shizuku 不向 servicemanager 注册该名）⇒ 那不是判据。
+  6 snub 侧  snub（uid 10135）点冻结：su 请求被服务、目标包状态真被翻成 `enabled=2`；机主 2026-10-21 亲手确认「有权限了」。
+  7 daemon 扛住厂商 force-stop  `am force-stop com.xplay6.temproot` 后 app 进程 0、`:3039` 监听仍在、
+    通道答 `uid=0(root) … context=u:r:init:s0`；日志 `out of every uid-scoped cgroup (3/3 controllers)`。
+  8 验收工装自身不再毁机主状态（§715）  `0b` 段跑前快照 + EXIT 还原；跑后名单 **inode 753904 与跑前相同**、
+    md5 `47ea7ecb…` 相同、诱饵文件原封不动。真因＝H 段 `mv` 换 inode 后被旧 trap 当垃圾删，已改 in-place。
+
+NOT VERIFIED（别当已交付）
+  · **G＝重启自愈**：本版未跑（需 `POST_REBOOT=1` ＋一次真实重启 ＋机主打开 vivo 自启动开关）。1.9.17/1.9.19
+    各自跑过并记绿，**不迁移**到本版。应用侧现读 0 条 TempRoot 开机日志、`dumpsys jobscheduler` 0 条本包作业。
+  · adb 侧 `run_credread7.sh` 的 `EXEMPT_BITS` 本版**未在设备实跑**（出货侧由 broot7 自证覆盖）。
+
+边界（不是欠项，是明说的边界）
+  · 内存态：`adb reboot` 即复原；不解 BL、不写任何分区。
+  · 副作用：7 枚型成为 per-domain permissive —— 这些域的 MAC 检查整体宽松（不只 su 这一条），这是本修复的代价。
+  · 授权名单是机主的文件（`10133 10135 10151 10134`）；本版工装只读它、跑完还原，不再清任何 app 数据里的名单。

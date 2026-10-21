@@ -27,6 +27,9 @@ import java.io.OutputStream;
  */
 public final class Demo extends Activity {
 
+    private static final String CMD =
+            "id; getenforce; grep -m1 CapEff /proc/self/status";
+
     private TextView view;
     private final Handler ui = new Handler(Looper.getMainLooper());
 
@@ -61,21 +64,44 @@ public final class Demo extends Activity {
         new Thread(new Runnable() {
             @Override
             public void run() {
-                final String r = requestRoot("id; getenforce; grep -m1 CapEff /proc/self/status");
-                Log.i("GrantedDemo", r);
+                /* The same bytes under two names, in one run: `sux` is our own client's shipped
+                 * name, `su` is the name vivo's exec-time guard used to refuse (ledger 643/664).
+                 * A criterion that only ever asks for `sux` cannot see the vendor check come back. */
+                final String a = requestRoot("sux", CMD);
+                final String b = requestRoot("su", CMD);
+                Log.i("GrantedDemo", a + " || " + b);
+                record("SUX " + a + "\nSU " + b);
                 ui.post(new Runnable() {
                     @Override
                     public void run() {
-                        view.append("---\n" + r + "\n");
+                        view.append("---\nsux: " + a + "\nsu: " + b + "\n");
                     }
                 });
             }
         }, "demo-ask").start();
     }
 
-    private String requestRoot(String cmd) {
+    /* Why a file and not just logcat: the logcat ring on this ROM is flooded by vivo services,
+     * so the harness' B/C/D lines came back empty while `relayd.log` proved the caller HAD run
+     * (ledger 673).  The result therefore gets written where the harness can read it without
+     * root, with a timestamp the harness compares against its own earlier reading -- "newer than
+     * the trigger" is then a witness, not an assumption. */
+    private void record(String body) {
         try {
-            File dst = new File(getFilesDir(), "sux");
+            File dir = getExternalFilesDir(null);
+            File f = new File(dir != null ? dir : getFilesDir(), "result.txt");
+            OutputStream o = new FileOutputStream(f);
+            o.write((System.currentTimeMillis() + " uid=" + android.os.Process.myUid() + "\n"
+                    + body + "\n").getBytes("UTF-8"));
+            o.close();
+        } catch (Throwable t) {
+            Log.i("GrantedDemo", "record failed: " + t);
+        }
+    }
+
+    private String requestRoot(String name, String cmd) {
+        try {
+            File dst = new File(getFilesDir(), name);
             InputStream in = getAssets().open("sux");
             OutputStream out = new FileOutputStream(dst);
             byte[] buf = new byte[64 * 1024];
@@ -88,7 +114,7 @@ public final class Demo extends Activity {
             dst.setReadable(true, false);
 
             Process pr = Runtime.getRuntime().exec(
-                    new String[] { "/data/data/com.xplay6.granted/files/sux", "-c", cmd });
+                    new String[] { dst.getAbsolutePath(), "-c", cmd });
             String so = slurp(pr.getInputStream());
             String se = slurp(pr.getErrorStream());
             pr.waitFor();

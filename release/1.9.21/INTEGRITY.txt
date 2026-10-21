@@ -1,0 +1,42 @@
+# 从解开的树根运行：sha256sum -c --ignore-missing release/1.9.21/INTEGRITY.txt（B 段两枚镜像不在包里，故 --ignore-missing）
+# INTEGRITY -- v1.9.21 归档包的逐字节对账
+# A) 包内关键件（下面这些无 # 前缀的行就是校验行，`sha256sum -c` 直接吃本文件）：
+4b1440558c2fd6fa74cab45ea1732f87c340a2910f67fb5d687dd1c2c980b39a  release/1.9.21/月虹提权助手-v1.9.21-release.apk
+bd71dd8251e169ee961b4c8d23174680386492cedecf407c27f73aa2409e3b66  tools/clobber.c
+6b7a7e4401ff38425f4327110f629cd8f2a53d0d7eb5714ad01b9d0c47155851  tools/esc.h
+2556b85a35188d3c7ec2a4aff838f23a8cef8bcf1769b15ae31acfd8f7814364  tools/copy_atomic.h
+bec9913399d39512a9aede891125e4f59e99010b8647899915ec651e8844b188  tools/borrow_verdict.h
+f175620c091d0b3c82e7c790e32f108ca5d5464ae7b1da4166d3f9d15db457d5  tools/hp_gain7.py
+00eabcea626a378b579933c89d64eb4486175c7171557d066fdd898381e022da  tools/pgdalias.py
+12556d6a54d4cbfca0778a2d48d88fa8d0119441abafb8d6a350dad2eae3778b  tools/gate_constants.py
+ea6cf01937b3abedb5b4b1d08f77585d51794e57ef5e589fc77a7b4d79af1d74  tools/verify_approot.sh
+919576da146b66cd21e31aed843dffc7ac00eec2c94746a0f383845ea87b58e2  tools/rehearse_sugate.sh
+9baf040000c485ab2a3a48beb0442856cba39d1ec54c754d33358f8ac48a145e  tools/port_check.sh
+3c29b8a16921bada3c068c45d87f878eb399dab06fd2dea82b59070b854084ef  tools/build_all.sh
+00d069126229940cc10480e6a8e1addf5ca51e552fed0f25be27a18acbbfcb7e  tools/apk/jni/jni_esc.c
+c2a6c0ee28c76dc240c26882f783fde56b085623e568f817ad99c4c4e61ab30f  tools/apk/build.sh
+84ccd873873a24175b9848aed6bb0b9a40a3bdcb4ecc31d565c178c8164fb225  tools/apk/src/com/xplay6/temproot/Chain.java
+08e40c5002012db8e156cafe61c53ce0a8e5fa41f0a1dffb042a158a6c28ff94  tools/apk/src/com/xplay6/temproot/Esc.java
+6f478d8745a40ae41002e2d8c4e0f318d4245ff2b20b5e82364ca2641ae66e3d  tools/apk/src/com/xplay6/temproot/BootJob.java
+6574c55b2dacbc4c10bcc70aad7bdc417e183a7fe2d7dc02c48dd3ae229834b7  tools/apk/src/com/xplay6/temproot/Main.java
+9e280b5dd0217fbc9a97556d3eaced5f3c0177ccb70c045055b8ba76265120fd  tools/apk/src/com/xplay6/temproot/EscService.java
+75110ce806a378215e5fa6a034a46cb7ea7da303470625bf777e3a49adbbfaff  tools/sud.c
+8130a150d43b8f7a0eb21fe9fcc3c44ca6d814eae513278807a416f6e9fd0c6c  tools/relayd.c
+ed6ebc2aa69698cffdf5ad233c41f93f165388919cac421aa7b5c3997970ec81  tools/broot7.c
+281cc7a5e7ae0bc44628f7acda8f25d5b749609966cf25cba7adaad991f53342  tools/suc.c
+320dda592e0ad4f1da82e32a0c92f7f3af8f363a3c7436dff0a792da55fa2093  tools/sumount.c
+38da7562ada5a8f080f010d49e5f3976678f28ecc4865e5d3105b16bd034d265  tools/nsmbind.c
+53b899824ff4d661853e563ed341e5522ba116825a6d79ed8c5b9dd3229e5dd4  art/kallsyms-7-real.txt
+e623d5d0f2053f21c52f8b953acd17335a28e5749ce7c260e854261a77e5d512  art/kallsyms_real.txt
+c20ed32de36f8a58093aa2e18858488e2ff46398cf0fba629dd4d70bbff190e5  art/chain-1.9.19-boot.txt
+
+# B) 不在包里（机主选择瘦包）。这两枚是 tools/pgdalias.py 与构建入口那道闸的权威依据；自己从同 ROM 的
+#    boot.img 取出 kernel 后，必须与下面两行逐字节相同，否则站点推导就没有意义（镜像不同＝地址不同）。
+293629ef13199a74beda358d8c45d23a82564582e9a032ab8681def5b1ab7002  fw/7/Image
+a6cfa5b05cdb1230ffc26ac0b38150cf25bf3db1fc248a6512122f419cfb20f4  fw/Image
+
+#    拿到镜像后先跑这两条，它们会自己说不说话：
+#      python3 tools/pgdalias.py --profile 7        （站点 0xffffffc000323400 的四项现读断言）
+#      python3 tools/gate_constants.py --selftest   （18 对比较 + 9 枚臂，含耳机增益那一枚）
+
+# C) 归档包本身的 sha256 见同目录 ARCHIVE-SHA256.txt（在 tar 外面，随包一起发）。

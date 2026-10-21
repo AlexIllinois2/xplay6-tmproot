@@ -9,13 +9,15 @@ dereference to be `[reg, #imm]` with imm == offset, so it missed `adrp x0,pg ; a
 Usage: tools/xref2.py <hex-va>
 """
 import bisect
+import os
 import sys
 
 from capstone import CS_ARCH_ARM64, CS_MODE_LITTLE_ENDIAN, Cs
 
-TEXT = 0xFFFFFFC000080000
-IMG = "/home/v/.local/project/xplay6/fw/Image"
-KALL = "/home/v/.local/project/xplay6/art/kallsyms_real.txt"
+# Defaults are the 6.0.1 baseline; point the same two at a second firmware's own artifacts (§470).
+TEXT = int(os.environ.get("KS_TEXT_BASE", "0xFFFFFFC000080000"), 0)
+IMG = os.environ.get("KS_IMG", "/home/v/.local/project/xplay6/fw/Image")
+KALL = os.environ.get("KS_KALL", "/home/v/.local/project/xplay6/art/kallsyms_real.txt")
 M64 = (1 << 64) - 1
 
 data = open(IMG, "rb").read()

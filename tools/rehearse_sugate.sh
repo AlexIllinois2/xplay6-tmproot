@@ -86,5 +86,15 @@ run K 1 'MEASUREMENT FAILED.*rollback landed' MOCK_NO_OUT=1
 run L 1 'alias not proven.*wrote 00000000 through the alias, getenforce is Enforcing' \
 	MOCK_FORCESLOT_PA=0x80000000
 
+# M/N: the 7 profile (witness = the modprobe_path STRING, not getenforce).  Before these two arms
+# existed, run_sugate.sh's modprobe branch -- the code that decides whether an alias window is
+# believed on THAT device -- had never been executed anywhere, and "ALL SCENARIOS PASS" only meant
+# 6.0.1 was unbroken.  M proves the string moves through the window and back; N is the negative:
+# a window aimed at the wrong PA must leave the string untouched and must be REFUSED.
+run M 0 'modprobe_path went "/sbin/modprobe" -> "/zz" -> "/sbin/modprobe"' \
+	MOCK_PROFILE=7 PROFILE=7 MOCK_DEFAULTS=1
+run N 1 'alias not proven.*wanted "/zz"' \
+	MOCK_PROFILE=7 PROFILE=7 MOCK_FORCESLOT_PA=0x80000000
+
 printf '\n%s  (logs in %s)\n' "$([ "$fails" = 0 ] && echo 'ALL SCENARIOS PASS' || echo "$fails SCENARIO(S) FAILED")" "$LOGD"
 exit "$([ "$fails" = 0 ] && echo 0 || echo 1)"

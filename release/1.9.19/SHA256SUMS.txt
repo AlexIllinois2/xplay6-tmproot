@@ -1,0 +1,3 @@
+# 在此目录内校验：sha256sum -c SHA256SUMS.txt（这两行是交付面文件，随包附在 tar 外面，不进 tar，否则自指）
+47337ef9ccdce77423d32fb706e23eab9809dfbc5e8a18c5fc6b6039517c3572  月虹提权助手-v1.9.19-release.apk
+f1db02b7f763309443b8140e24736b77ca753c11f65a8edd5fd5807e9845a81c  月虹提权助手-v1.9.19-src-docs.tar.gz

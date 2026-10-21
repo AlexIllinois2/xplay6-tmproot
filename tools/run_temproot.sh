@@ -18,8 +18,22 @@ SER=${1:-3e5a38a5}
 ADB="adb -s $SER"
 DEV=/data/local/tmp
 T="$(dirname "$0")"
-SELINUX_ENFORCING=0xffffffc00189be74
-MODPROBE_PATH=0xffffffc001635a30
+# Kernel build -> targets.  Hand-typed constants rot the moment the firmware changes, so the choice is
+# made off the running kernel's own UTS string and an unknown build aborts instead of writing a guess.
+# 6.0.1 (3.18.20-perf-gb6998a3): selinux_enforcing .bss via enforcing_setup's str w1,[x0,#0xe74];
+#                                modprobe_path proven twice over (kallsyms index + the unique
+#                                "/sbin/modprobe" file offset under VA = foff + 0xffffffc000080000).
+# 7.1.1 (3.18.31-perf-g9dce1fbc9): same two methods on fw/7/Image, recovered table in
+#                                art/kallsyms-7-real.txt (art/ledger-20261016.md §470/§472).
+KREL="$(${ADB} shell uname -r 2>/dev/null | tr -d '\r')"
+case "$KREL" in
+	3.18.20-perf-gb6998a3*)	DFLT_SEL=0xffffffc00189be74; DFLT_MOD=0xffffffc001635a30 ;;
+	3.18.31-perf-g9dce1fbc9*)	DFLT_SEL=0xffffffc001d5dbe4; DFLT_MOD=0xffffffc001a499b8 ;;
+	*)	fail "unknown kernel '$KREL': no verified constant profile for it -- refuse to write" ;;
+esac
+printf 'kernel %s -> selinux_enforcing=%s modprobe_path=%s\n' "$KREL" "$DFLT_SEL" "$DFLT_MOD"
+SELINUX_ENFORCING=${SELINUX_ENFORCING:-$DFLT_SEL}
+MODPROBE_PATH=${MODPROBE_PATH:-$DFLT_MOD}
 # Which listener modprobe_path should point at.  rootsh is the original raw shell;
 # sud is the one that carries the grant list, so DAEMON=sud is how the acceptance
 # gate gets pointed at the new daemon.  Both bind 12345 -- only one should be

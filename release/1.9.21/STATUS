@@ -1,0 +1,35 @@
+STATUS 1.9.21 —— app 首启自己喂 Settings 的记录，使「USB模拟点击」**不要 vivo 账号**
+取证正文＝`art/ledger-20261021.md` §691–§702。判据面全部设备现读，分母随读数报。
+
+VERIFIED
+  1 构建可复现  `tools/apk/build.sh` rc=0，入口那道 `gate_constants` **真跑**（18 对常量 vs pgdalias 两档 profile → AGREE），未用 `SKIP_GATE`。
+  2 只改了 Java  `release/1.9.19` 出货包 vs 本包逐成员对照：**7 枚原生件全部 SAME**，只有 manifest / classes.dex / 签名块不同。
+  3 装机无人  `tools/install_tap.py`（`TAPBACKEND=adb`）→ `继续安装`→`安装` `landed=2 refused=0` → `Success`・`versionCode 41`；两端 md5 同 `d57d63785f80b6a1c5f0c0ebc13ac318`。
+  4 新代码两支各有读数  幂等支 `st=already count=1 label=u:object_r:system_app_data_file:s0`；
+    ★删档重触发（走 alive 支、**不再花针**）→ **`st=written count=1`**，`cat` 回读 126 B 且形状与 §696 验过那份逐字节同。
+  5 能力前提仍在  本包装机前后 `vivo_adb_simulate_input` 由 ContentObserver 即时跟随；§701 已证它**跨开机存活**（1 → `adb reboot` → 1，本次开机 0 条写入日志）。
+
+VERIFIED（续）
+  6 ★"不要账号"这一句**已在设备上复现**（2026-10-21，机主亲手拨）：三枚证人连成一串——
+    `I/VivoPKMSUtils(1419): Observer change, Is allow adb simulate input ? false`（拨关）
+    → `D/DevelopmentSettings(2270): readVerifiedRecord: true`（读到的就是 **app 自己写**的那份：`mtime 02:19`・126 B・`system:system`・`u:object_r:system_app_data_file:s0`；
+    我手工写的那份已在 §703 被删）
+    → `I/VivoPKMSUtils(1419): Observer change, Is allow adb simulate input ? true`（拨开）・终读 `vivo_adb_simulate_input=1`。
+    ⇒ 全链闭合：app 播种记录 → 官方开关**不弹账号** → PKMS 即时翻转 → adb 注入可用 → 装包无人。
+
+  7 整机主模式验收表（本版重跑）  `EXPECT_ENFORCING=1 bash tools/verify_approot.sh 3e5a38a5` →
+    `coverage: 17/17 criteria reported (mode=main)`・`pass=17 fail=0 refused=0` →
+    `APP ESCALATION + AUTHORIZATION VERIFIED`。逐臂：A1 A2 B C L D E1 E2 F0 F **H** I I2 J JP K2 K 全 PASS。
+    ★**G（重启自愈）不在本枚分母里**——它要 `POST_REBOOT=1` 且紧跟一次真实重启才跑，本版**没跑那一发**；别把 17/17 读成"含重启自愈全绿"。
+    ★H 之所以能算，是本次带了 `EXPECT_ENFORCING=1`（表里自己注明）。
+
+NOT YET VERIFIED（别当已交付）
+  · **G＝重启自愈**：本版未跑（需 `POST_REBOOT=1` ＋一次真实重启，会花一枚针）。1.9.17/1.9.19 那两版各自跑过并记绿，**不迁移到本版**。
+  · ~~"不要账号"这一句还差一发人拨~~ —— **已做完，移到上面第 6 条**（2026-10-21）。
+  · ~~`install_and_verify.sh` 的前置闸仍未加~~ —— 已加（§705：`tools/gate_verdict.sh` 七臂自测・真跑读数 `ROM input gate: ... =1 backend=adb -> OK`）。
+
+边界（明说，不是欠项）
+  · Secure 值本身**root 写不了**（daemon 无 servicemanager）⇒ app 只能让那一拨不要账号，不能替你拨。
+  · 解开后任何接上这台机的 ADB 都能注入点击。
+  · `adb root` 已判为这台机上结构性不可能（adbd 自降到 uid 2000），不推进。
+  · 装机/验收会花针（实测崩率 ~1/13）：本包这次 `ladder attempt 1` 中。

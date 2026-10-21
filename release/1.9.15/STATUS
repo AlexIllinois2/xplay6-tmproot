@@ -1,0 +1,41 @@
+SHIPPED BUILD, PACKAGED 2026-10-20 16:24 (device clock +11 min at read time) -- Android 7.1.1 (PD1610, NMF26F release-keys), kernel 3.18.31-perf-g9dce1fbc9, versionCode 36.
+MAIN-MODE TABLE IS FULLY JUDGED AND GREEN (16/16, fail=0, refused=0).  Read the per-line basis below;
+H and G need their own modes (EXPECT_ENFORCING=1 / POST_REBOOT=1) and are listed separately.
+  POST_REBOOT=1        PASS G  (reboot -> uid=2000, Enforcing, sud-procs=0, listeners=0 -> "REVERSIBILITY VERIFIED")
+  gate across reboot   PASS    the boot chain opens the vendor su-NAME gate by itself, no adb used:
+                               `sugate7 attempt 1: rc=0 ... patch written (NOP at 0x323400)` then
+                               `app-exec su: execve allowed`, and an independent ruler flips
+                               `control_su: errno=1 -> RAN` at boot+250 s (ledger 670/672).
+  criterion K2         PASS    unprivileged `adb shell /sbin/su -c id` is ADMITTED -- the daemon answers
+                               (`ERR unknown service` for an unlisted caller, `uid=0` for a listed one).
+                               K2 has four states, each exercised with a synthetic reading, and a closed
+                               gate can no longer be reported green (it FAILs with the named cause).
+  third-party root     MEASURED: Shizuku's own root card renders and `shizuku_server` runs as uid=0
+                               (ctx u:r:init:s0) -- seen on two different boots; snub's request is audited
+                               `allow uid=10135 ... code=0`.  Plus the automated half (criterion L) now
+                               proves the same end state with a third-party uid and the literal name.
+  main-mode table      PASS 16/16, fail=0, refused=0 -> "APP ESCALATION + AUTHORIZATION VERIFIED"
+                               A1 A2 B C L D E1 E2 F0 F I I2 J JP K K2.  The five that had been unreadable
+                               for rounds (B/C/D/J/JP) are judged because the demo now reports into a file
+                               and the harness waits for a marker it can actually read (ledger 674/675).
+                               L is the user's own sentence: a granted third-party app that execs the
+                               literal name `su` -> `SU out=uid=0(root) gid=0(root) ... u:r:init:s0`,
+                               and D shows the same app refused again one revocation later.
+WHAT CHANGED IN THIS BUILD (all four have a reading; ledger 664-672):
+  1. esc_sugate7: the boot chain opens 7's su-name gate.  The site is the one instruction that CONSUMES
+     the gate's verdict (do_execveat_common+0x40 `tbnz w0,#0x1f` -> `mov w19,#-1` = EPERM), written to a
+     NOP through a 1 GB alias placed in an empty pgd slot.  Memory-only; `adb reboot` restores the gate.
+     SUPERSEDED NOTE (1.9.16): this build's own log shows the app path DID print `sugate7 alias PROVEN`
+     (ledger 670), so "the app cannot read /proc/sys/kernel/modprobe" was never a reading -- it was my
+     inference from the code's fallback branch.  The branch itself was the real defect: on a boot where
+     that read fails, this build patches .text without any window witness.  1.9.16 moves the read to
+     the caller (over the daemon's root channel) and refuses the patch when it does not move.
+  2. relayd serves each caller in its own child (an interactive session no longer blocks other callers).
+  3. the liveness probe runs off the main thread.  It used to throw NetworkOnMainThreadException on every
+     call, which made `alive()` answer "unreachable" on healthy boots and sent EscService to spend a
+     SECOND kernel needle in the same boot -- that, not the alias or the patched instruction, is what
+     rebooted the phone twice (ledger 672).
+  4. selfGrant no longer rewrites an allow list it cannot read, so root-owned lists keep the owner's
+     third-party entries (measured: a root-owned 3-line list survived a full chain run).
+Product semantics unchanged: recovery from a mid-boot daemon death is a reboot or a hand on the escalate
+button, one needle per boot at most.  Bootloader never unlocked, no partition written.

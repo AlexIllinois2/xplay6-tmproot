@@ -18,7 +18,8 @@ import blsweep as B  # noqa: E402
 
 from capstone import CS_ARCH_ARM64, CS_MODE_ARM, Cs  # noqa: E402
 
-IMG = os.path.join(ROOT, "fw", "Image")
+# DISREG_IMG lets the same disassembler read another firmware image (the 7.1.1 one) instead of the baseline
+IMG = os.environ.get("DISREG_IMG") or os.path.join(ROOT, "fw", "Image")
 TEXT = B.TEXT
 
 

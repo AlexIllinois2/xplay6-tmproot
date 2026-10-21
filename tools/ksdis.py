@@ -4,14 +4,17 @@
 Usage: tools/dis.py <symbol> [num_instr]
 VA = file_offset + TEXT_BASE (0xffffffc000080000); symbols from art/kallsyms_real.txt.
 """
+import os
 import re
 import sys
 
 from capstone import CS_ARCH_ARM64, CS_MODE_LITTLE_ENDIAN, Cs
 
-TEXT_BASE = 0xFFFFFFC000080000
-IMG = "/home/v/.local/project/xplay6/fw/Image"
-KALL = "/home/v/.local/project/xplay6/art/kallsyms_real.txt"
+# Defaults are the 6.0.1 baseline.  A second firmware (the official 7.1.1 Image) is analysed by
+# pointing these three at its own files -- same link base, different table (§470).
+TEXT_BASE = int(os.environ.get("KS_TEXT_BASE", "0xFFFFFFC000080000"), 0)
+IMG = os.environ.get("KS_IMG", "/home/v/.local/project/xplay6/fw/Image")
+KALL = os.environ.get("KS_KALL", "/home/v/.local/project/xplay6/art/kallsyms_real.txt")
 
 
 def load_syms():

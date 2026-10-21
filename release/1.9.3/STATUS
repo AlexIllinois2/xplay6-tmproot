@@ -1,0 +1,1 @@
+superseded by 1.9.4 (the broot7 asset in this build carries two regressions introduced in ledger 600: win_open/kread mutual recursion, and the read aim ordered before the window)

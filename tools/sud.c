@@ -9,6 +9,8 @@
 #include <dirent.h>
 #include <signal.h>
 #include <sys/stat.h>
+#include "copy_atomic.h"
+#include "grants_rule.h"
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/select.h>
@@ -50,6 +52,12 @@
 #define SOCKDIR      "/dev/.sud"
 #define SOCKDIR2     "/data/local/tmp/.sud"
 #define MIRROR       SOCKDIR2 "/mirror"
+/* Where served callers drop their `req-<pid>` handoff name.  It has to be writable by
+ * them, so it is separated from SOCKDIR2 -- which holds OUR socket, log and session dir --
+ * and made sticky: 1777 lets a caller create its own drop but not delete or replace
+ * another's (measured 2026-10-19: with SOCKDIR2 itself closed to 0711 every client fails
+ * at `cannot publish request name`, so a search-only .sud is only safe together with this). */
+#define REQDIR       SOCKDIR2 "/req"
 
 static int g_ltcp = -1, g_lsu = -1, g_abs = -1, g_gunix = -1;
 
@@ -168,8 +176,15 @@ static int listen_unix(const char *dir)
         return -1;
     }
     snprintf(path, sizeof path, "%s/sud.sock", dir);
-    if (mkdir(dir, 0777) < 0 && errno != EEXIST)
+    /* 0711, and chmodded again every start: clients need SEARCH on this directory to reach the
+     * socket, and nothing needs WRITE -- while a writable directory lets any app uid unlink
+     * sud.sock and bind its own there, which turns every future client into a confession to the
+     * fake daemon.  The chmod is not redundant: a directory created by an older build (0777) is
+     * left in place by EEXIST, so the repair has to happen on each start. (ledger 586) */
+    if (mkdir(dir, 0711) < 0 && errno != EEXIST)
         stage("mkdir %s: errno=%d (continuing)", dir, errno);
+    if (chmod(dir, 0711) != 0)
+        stage("chmod %s 0711: errno=%d", dir, errno);
     unlink(path);
     memset(&a, 0, sizeof a);
     a.sun_family = AF_UNIX;
@@ -357,34 +372,12 @@ static int mkdirs(const char *path)
 
 static int copy_file(const char *src, const char *dst)
 {
-    char b[8192];
-    int fi = open(src, O_RDONLY), fo = open(dst, O_WRONLY | O_CREAT | O_TRUNC, 0755);
-    int r, n;
+    int damaged = 0;
+    int rc = deliver_client(src, dst, &damaged);
 
-    if (fi < 0 || fo < 0) {
-        stage("copy %s -> %s: errno=%d", src, dst, errno);
-        if (fi >= 0)
-            close(fi);
-        if (fo >= 0)
-            close(fo);
-        return -1;
-    }
-    while ((r = read(fi, b, sizeof b)) > 0) {
-        n = 0;
-        while (n < r) {
-            int w = write(fo, b + n, r - n);
-            if (w <= 0) {
-                close(fi);
-                close(fo);
-                return -1;
-            }
-            n += w;
-        }
-    }
-    close(fi);
-    close(fo);
-    chmod(dst, 0755);
-    return r < 0 ? -1 : 0;
+    if (rc != 0)
+        stage("copy %s -> %s failed%s", src, dst, damaged ? " AND LEFT A SUSPECT DESTINATION" : "");
+    return rc;
 }
 
 static int mirror_overlay(const char *dir, const char *client, const char *name)
@@ -411,6 +404,14 @@ static int mirror_overlay(const char *dir, const char *client, const char *name)
         snprintf(dst, sizeof dst, "%s/%s", base, de->d_name);
         if (stat(src, &st) < 0)
             continue;
+        if (name && !strcmp(de->d_name, name)) {
+            /* The name we are about to deliver is NOT mirrored from the read-only tree: an old
+             * /sbin/su (measured: a zero-byte stub) rebound over the destination would then be
+             * what our client gets written into.  Skip it and write the real client instead. */
+            if (S_ISDIR(st.st_mode))
+                mkdir(dst, 0755);
+            continue;
+        }
         if (S_ISDIR(st.st_mode))
             mkdir(dst, 0755);
         else {
@@ -423,9 +424,21 @@ static int mirror_overlay(const char *dir, const char *client, const char *name)
     }
     closedir(d);
     if (client != NULL && name != NULL) {
+        struct stat sc, sd;
+
         snprintf(dst, sizeof dst, "%s/%s", base, name);
-        if (copy_file(client, dst) < 0)
+        snprintf(src, sizeof src, "%s", client);
+        if (copy_file(src, dst) < 0)
             return -1;
+        /* A delivered stub is the failure we actually saw on-device: verify the byte count
+         * against the client, and refuse to call the overlay done otherwise. */
+        if (stat(client, &sc) != 0 || stat(dst, &sd) != 0 || sd.st_size != sc.st_size)
+            stage("overlay %s: %s is %lld bytes, client is %lld -- NOT delivered",
+                  dir, name, (long long)(stat(dst, &sd) == 0 ? sd.st_size : -1),
+                  (long long)(stat(client, &sc) == 0 ? sc.st_size : -1));
+        else
+            stage("overlay %s: %s = %lld bytes, matches the client", dir, name,
+                  (long long)sd.st_size);
     }
     if (bind_over(base, dir) < 0)
         return -1;
@@ -450,6 +463,104 @@ static void install_su(const char *client, int also_bin)
         mirror_overlay("/system/bin", client, "su");
 }
 
+/* MSWAP: swap ONE file inside a read-only tree without writing to any partition.
+ * Same mirror trick as install_su, but parameterized -- the thing we actually want to
+ * swap is a calibration file, not the su client.
+ *
+ * Why it lives here and not in a root shell (measured 2026-10-15): mount(2) whose
+ * destination lies inside /system is refused EPERM even for uid 0 with full capabilities
+ * in a permissive-mapped domain -- the mount class is not exempted by permissive, and only
+ * the init domain may mount at all.  This daemon relabels itself into u:r:init:s0, so it
+ * is the only caller in this design that can do it.
+ */
+static int dir_of(const char *path, char *out, int cap)
+{
+    const char *slash = strrchr(path, '/');
+
+    if (slash == NULL || slash == path)
+        return -1;
+    if ((int)(slash - path) + 1 > cap)
+        return -1;
+    memcpy(out, path, slash - path);
+    out[slash - path] = 0;
+    return 0;
+}
+
+static int mirror_swap(const char *src, const char *dst, int revert)
+{
+    char dir[300], mroot[360], from[400], to[420];
+    const char *name;
+    struct dirent *de;
+    DIR *d;
+    int cnt = 0, rc;
+
+    name = strrchr(dst, '/');
+    if (name == NULL || name[1] == 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    name++;
+    if (dir_of(dst, dir, (int) sizeof dir) < 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    snprintf(mroot, sizeof mroot, "%s%s", MIRROR, dir);
+
+    if (revert) {
+        /* one lazy unmount of the mirrored directory takes the bound-through entries with
+         * it; the on-disk bytes under /system were never touched. */
+        rc = umount2(dir, MNT_DETACH);
+        stage("MSWAP revert dir=%s rc=%d errno=%d", dir, rc, rc ? errno : 0);
+        return rc;
+    }
+    if (access(src, R_OK) != 0) {
+        stage("MSWAP: src %s unreadable errno=%d", src, errno);
+        return -1;
+    }
+    umount2(dir, MNT_DETACH);	/* a stale mirror of the same dir must not shadow this swap */
+    if (mkdirs(mroot) < 0)
+        return -1;
+    d = opendir(dir);
+    if (d == NULL) {
+        stage("MSWAP opendir %s: errno=%d", dir, errno);
+        return -1;
+    }
+    while ((de = readdir(d)) != NULL) {
+        struct stat st;
+        int f;
+
+        if (!strcmp(de->d_name, ".") || !strcmp(de->d_name, ".."))
+            continue;
+        snprintf(from, sizeof from, "%s/%s", dir, de->d_name);
+        snprintf(to, sizeof to, "%s/%s", mroot, de->d_name);
+        if (stat(from, &st) < 0)
+            continue;
+        if (S_ISDIR(st.st_mode)) {
+            mkdir(to, 0755);
+            bind_over(from, to);
+            continue;
+        }
+        if (!strcmp(de->d_name, name)) {
+            if (copy_file(src, to) < 0) {
+                closedir(d);
+                stage("MSWAP: could not lay %s in place of %s", src, dst);
+                return -1;
+            }
+            continue;
+        }
+        f = open(to, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (f >= 0)
+            close(f);
+        if (bind_over(from, to) == 0)
+            cnt++;
+    }
+    closedir(d);
+    rc = bind_over(mroot, dir);
+    stage("MSWAP %s -> %s: bound through %d entries, replaced=%s, dir bind rc=%d errno=%d",
+          src, dst, cnt, name, rc, rc ? errno : 0);
+    return rc;
+}
+
 /* One request per connection, text protocol (documented, versioned by content):
  *   PING                          -> PONG uid=... pid=...
  *   SU <uid> <shell cmd...>       -> run cmd as that uid (0 = root) with this
@@ -459,6 +570,11 @@ static void install_su(const char *client, int also_bin)
  *   SU 0 -                        -> interactive shell (commands arrive as stdin)
  *   MOUNT <client> [bin]          -> deliver `su` at /system/xbin, /sbin (and
  *                                    /system/bin if bin is given) by tmpfs+bind
+ *   MSWAP <src> <dst-file>        -> make <dst-file> (inside a read-only tree) read
+ *                                    <src> instead, by mirroring its DIRECTORY and
+ *                                    binding every other entry through.  Root-only.
+ *   UMSWAP <dst-file>             -> lazy-unmount that mirror; the partition bytes
+ *                                    were never touched, so this is the whole undo.
  */
 /* ---- who is actually asking? -------------------------------------------
  * A TCP peer can put any uid in the request line, but it cannot edit the
@@ -690,29 +806,20 @@ static int token_matches(const char *line, uid_t *uid_out)
     return 0;
 }
 
-/* A list that anyone can write is not a list -- but "group/world-writable" alone is the wrong
- * test, and measured it: when tools/verify_approot.sh (running as root) appends to the manager's
- * own grants.txt, umask leaves it 0666 root:root, and a mode-only rule locked the *legitimate*
- * path out too (criterion C went red for that reason).  So ask the question that actually
- * matters -- can callers other than the file's own owner write it?  That is exactly
- * (group-writable and the daemon is not in the owner's group) or other-writable.  On this
- * device uid 0 is in no app group, so root:root 0666 stays usable while any world-writable
- * list -- e.g. /data/local/tmp/sud.grants at 0666, through which an untrusted_app appended its
- * own uid and got uid=0 (measured 2026-10-15) -- is ignored outright. */
-static int grants_file_usable(const char *path)
+/* The rule lives in tools/grants_rule.h (shared with tools/grants_rule_test.c, which compiles the
+ * same text the daemon ships with); this wrapper only adds the daemon's own log line. */
+static int grants_file_usable(const char *path, int owner_must_be_root)
 {
-    struct stat st;
+    int ok = grants_file_usable_at(path, getgid(), owner_must_be_root);
 
-    if (stat(path, &st) != 0)
-        return 0;
-    if (!S_ISREG(st.st_mode))
-        return 0;
-    if ((st.st_mode & S_IWOTH) != 0 || ((st.st_mode & S_IWGRP) != 0 && st.st_gid != getgid())) {
-        stage("grants %s IGNORED: mode %04o owner=%u lets callers other than the owner write it",
-              path, (unsigned)(st.st_mode & 07777), (unsigned)st.st_uid);
-        return 0;
+    if (!ok) {
+        struct stat st;
+
+        if (stat(path, &st) == 0)
+            stage("grants %s IGNORED: mode %04o owner=%u -- not a list this daemon may trust",
+                  path, (unsigned) (st.st_mode & 07777), (unsigned) st.st_uid);
     }
-    return 1;
+    return ok;
 }
 
 static int uid_allowed(int uid)
@@ -725,7 +832,7 @@ static int uid_allowed(int uid)
     for (i = 0; i < 3; i++) {
         FILE *f;
 
-        if (!grants_file_usable(GRANTS_CANDIDATES[i]))
+        if (!grants_file_usable(GRANTS_CANDIDATES[i], i == 2))
             continue;
         f = fopen(GRANTS_CANDIDATES[i], "r");
         if (f == NULL)
@@ -784,7 +891,9 @@ static void su_log(const char *fmt, ...)
     va_list ap;
     int n, fd;
 
-    fd = open(SU_LOG, O_WRONLY | O_CREAT | O_APPEND, 0644);
+    /* 0600: this file names which uids were granted and which were refused.  The harness reads it
+     * through the root channel, so world-readability bought nothing but a leak. (ledger 586) */
+    fd = open(SU_LOG, O_WRONLY | O_CREAT | O_APPEND, 0600);
     if (fd < 0)
         return;
     va_start(ap, fmt);
@@ -805,8 +914,8 @@ static void session_put(int uid, pid_t child, int tries)
     char path[160], b[64];
     int fd, n;
 
-    mkdir(SESSDIR, 0777);
-    chmod(SESSDIR, 0777);
+    mkdir(SESSDIR, 0700);
+    chmod(SESSDIR, 0700);     /* written and swept by root only; clients never look in here */
     snprintf(path, sizeof path, "%s/%d", SESSDIR, (int) child);
     fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (fd < 0)
@@ -1004,6 +1113,42 @@ static void dispatch_su(int fd, int cuid, pid_t cpid, char *line)
         } else {
             write(fd, "ERR usage: MOUNT <path-to-su-client> [bin]\n", 42);
         }
+        return;
+    }
+    if (!strncmp(line, "MSWAP", 5) || !strncmp(line, "UMSWAP", 6)) {
+        int revert = (line[0] == 'U');
+        char *arg = strchr(line, ' ');
+        char *sp;
+        int rc = -1;
+        char r[96];
+
+        /* Changing which bytes every process reads is a global act, exactly like MOUNT:
+         * only an already-root caller may ask for it. */
+        if (cuid != 0) {
+            stage("MSWAP refused for uid=%d (root-only operation)", cuid);
+            su_log("refuse uid=%-6d pid=%-6d (MSWAP is root-only) %.120s", cuid, cpid, line);
+            write(fd, "ERR permission denied\n", 22);
+            return;
+        }
+        if (arg == NULL) {
+            write(fd, "ERR usage: MSWAP <src-file> <dst-file> | UMSWAP <dst-file>\n", 58);
+            return;
+        }
+        *arg++ = 0;
+        if (revert) {
+            rc = mirror_swap(NULL, arg, 1);
+        } else {
+            sp = strchr(arg, ' ');
+            if (sp == NULL) {
+                write(fd, "ERR usage: MSWAP <src-file> <dst-file>\n", 39);
+                return;
+            }
+            *sp++ = 0;
+            rc = mirror_swap(arg, sp, 0);
+        }
+        snprintf(r, sizeof r, "%s mswap rc=%d\n", rc == 0 ? "OK" : "ERR", rc);
+        write(fd, r, strlen(r));
+        su_log("%s uid=%-6d pid=%-6d %.160s", rc == 0 ? "grant" : "refuse", cuid, cpid, line);
         return;
     }
     if (!strncmp(line, "SU", 2)) {
@@ -1211,7 +1356,7 @@ static void serve_peer(int fd)
 
 static void scan_peers(void)
 {
-    DIR *d = opendir(SOCKDIR2);
+    DIR *d = opendir(REQDIR);
     struct dirent *de;
 
     if (d == NULL)
@@ -1225,7 +1370,7 @@ static void scan_peers(void)
 
         if (strncmp(de->d_name, "req-", 4))
             continue;
-        snprintf(path, sizeof path, "%s/%s", SOCKDIR2, de->d_name);
+        snprintf(path, sizeof path, "%s/%s", REQDIR, de->d_name);
         f = fopen(path, "r");
         if (f == NULL)
             continue;
@@ -1294,6 +1439,78 @@ static void run_conf(void)
     fclose(f);
 }
 
+/* Android's force-stop does not signal a process, it signals every pid LISTED IN THE APP'S CGROUP:
+ * killProcessGroup() reads /dev/cpuctl/apps/uid_<n>/pid and kills what it finds there.  A detached
+ * child of the manager app stays in that file after fork+setsid, so "root while the manager app is
+ * closed" only lasted as long as the app did -- measured 2026-10-21: the ladder reported uid=0 and
+ * "daemon listener confirmed on 12345", then logcat showed `Killing 5036:com.xplay6.temproot ...
+ * stop com.xplay6.temproot` and the listener was gone with it.  Root with CAP_SYS_ADMIN may move
+ * itself to the top-level group, which is on no uid's kill list.  The move is confirmed by reading
+ * /proc/self/cgroup again, because a write that returns its byte count is not evidence that the
+ * task actually changed groups. */
+static void read_small(const char *path, char *out, size_t cap)
+{
+    int fd = open(path, O_RDONLY);
+
+    out[0] = '\0';
+    if (fd < 0)
+        return;
+    {
+        ssize_t got = read(fd, out, cap - 1);
+
+        close(fd);
+        if (got > 0) {
+            out[got] = '\0';
+            while (got > 0 && (out[got - 1] == '\n' || out[got - 1] == '\r'))
+                out[--got] = '\0';
+        }
+    }
+}
+
+static void escape_app_cgroup(void)
+{
+    char line[512], pidline[32], where[768];
+    int n, moved = 0, seen = 0;
+    FILE *m;
+
+    if (geteuid() != 0) {
+        stage("uid=%d at start: no cgroup move attempted", getuid());
+        return;
+    }
+    /* One controller is not enough: killProcessGroup walks EVERY cgroup mount whose path names this
+     * uid (broot7's log on 2026-10-21 showed cpu already at / while `1:cpuacct:/uid_10151/pid_5034`
+     * still listed the task, and the daemon was killed from that list).  Enumerate the mounts. */
+    n = snprintf(pidline, sizeof pidline, "%d", getpid());
+    m = fopen("/proc/mounts", "re");
+    if (m != NULL) {
+        while (fgets(line, sizeof line, m)) {
+            char dev[256], mnt[256], type[64], path[300];
+
+            if (sscanf(line, "%255s %255s %63s", dev, mnt, type) != 3 || strcmp(type, "cgroup") != 0)
+                continue;
+            seen++;
+            snprintf(path, sizeof path, "%s/tasks", mnt);
+            {
+                int fd = open(path, O_WRONLY);
+
+                if (fd < 0)
+                    continue;
+                if (write(fd, pidline, (size_t)n) == n)
+                    moved++;
+                close(fd);
+            }
+        }
+        fclose(m);
+    }
+    read_small("/proc/self/cgroup", where, sizeof where);
+    if (!seen)
+        stage("no cgroup mounts readable -- a force-stop of the manager app can still reach us");
+    else if (strstr(where, "uid_") != NULL)
+        stage("cgroup escape INCOMPLETE (%d/%d controllers): groups: %s", moved, seen, where);
+    else
+        stage("out of every uid-scoped cgroup (%d/%d controllers); groups: %s", moved, seen, where);
+}
+
 static void proof(void)
 {
     char buf[512];
@@ -1346,6 +1563,8 @@ int main(void)
     setsid();
     if (fork() > 0)
         _exit(0);
+    /* setsid detaches the session; only leaving the cgroup escapes killProcessGroup. */
+    escape_app_cgroup();
 
     g_ltcp = listen_on(TCP_PORT, "sh");
     g_lsu = listen_on(SU_PORT, "su");
@@ -1366,9 +1585,16 @@ int main(void)
     run_conf();
     /* request directory for the reverse-direction channel: apps must be able to
      * create files in it, so it is 0777 (we can mkdir even where bind is refused) */
-    if (mkdir(SOCKDIR2, 0777) < 0 && errno != EEXIST)
+    if (mkdir(SOCKDIR2, 0711) < 0 && errno != EEXIST)
         stage("mkdir %s: errno=%d", SOCKDIR2, errno);
-    chmod(SOCKDIR2, 0777);
+    chmod(SOCKDIR2, 0711);    /* search-only: see the listen_unix note */
+    if (mkdir(REQDIR, 01777) < 0 && errno != EEXIST)
+        stage("mkdir %s: errno=%d", REQDIR, errno);
+    /* Own it even if a caller created it first: an attacker-owned sticky dir would let that
+     * attacker delete other callers' drops (the dir owner bypasses S_ISVTX). */
+    if (chown(REQDIR, 0, 0) != 0)
+        stage("chown %s: errno=%d", REQDIR, errno);
+    chmod(REQDIR, 01777);     /* re-applied every start: an old build left it 0777, no sticky */
 
     max = 1;
     if (g_ltcp >= max)
@@ -1400,6 +1626,11 @@ int main(void)
         fd = select(max, &rf, NULL, NULL, &tv);
         if (fd <= 0)
             continue;
+        /* Both handlers already fork at their first line (serve_tcp:305, serve_su_conn:1265), so a
+         * caller that stays open -- an interactive `su` session, which is what Shizuku holds --
+         * does NOT block this loop.  Measured on the device 2026-10-20 (ledger 669): with one
+         * interactive session held open, a second `su -c id` was answered in 1 s with uid 0.
+         * Serving inline here would be a regression, so the accept branches stay as they were. */
         if (g_ltcp >= 0 && FD_ISSET(g_ltcp, &rf)) {
             int c = accept(g_ltcp, NULL, NULL);
             if (c >= 0) {

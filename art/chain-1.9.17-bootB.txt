@@ -1,0 +1,19 @@
+# 1.9.17 boot B（冷开机自发链）与 boot C（G/H 那枚）的链日志摘录，主机 grep 自 adb logcat
+07-03 10:12:43.053  4725  4742 I TempRoot-boot: daemon probe :12346 failed: java.net.ConnectException: Connection refused
+07-03 10:12:43.055  4725  4742 I TempRoot-boot: daemon probe :12345 failed: java.net.ConnectException: Connection refused
+07-03 10:15:13.378  4725  4743 I TempRoot-boot: self-grant uid=10151 resealed saved=true list=[10151, 10133, 10135] why=-
+07-03 10:16:31.195  4725  4743 I TempRoot-boot: broot7 attempt 1 rc=0: 
+07-03 10:16:31.215  4725  4743 I TempRoot-boot: broot7 steps: TASKVA=0xffffffc11214bd40 pid=5102 agreement=4 cred=0xffffffc11214c200 real_cred=0xffffffc11214c398 prio=0xffffffc11214bd94 | TASKVA=0xffffffc11214bd40 pid=5102 agreeme
+07-03 10:16:31.453  4725  4743 I TempRoot-boot:   root probe [peer(SCM_CREDENTIALS)]: uid=0(root) gid=0(root) groups=0(root),3003(inet),9997(everybody),50151(all_a151) context=u:r:init:s0
+07-03 10:16:32.410  4725  4743 I TempRoot-boot:   sugate7 open: rc=0 sugate7-open in-process read of modprobe_path: /sbin/modprobesugate7-open alias entry addr=0xffffffc001f4cff8 rounds=24 rc=1sugate7-open witness write addr=0xfff
+07-03 10:16:32.941  4725  4743 I TempRoot-boot:   window PROVEN through the alias: modprobe_path "/sbin/modprobe" -> "/zz"
+07-03 10:16:33.196  4725  4743 I TempRoot-boot:   sugate7 restore: rc=0 sugate7-restore write "/sbin/modprobe" as the full 64-byte modprobe_path addr=0xffffffffc1a499b8 rounds=24 rc=1
+07-03 10:16:33.682  4725  4743 I TempRoot-boot:   sugate7 patch: rc=0 sugate7-patch addr=0xffffffffc0323400 (=0xffffffc000323400 via alias) rounds=24 rc=1sugate7-patch written (NOP at 0x323400); caller must witness by execve of a 
+07-03 10:16:33.682  4725  4743 I TempRoot-boot: sugate7 attempt 1: rc=0 sugate7-patch addr=0xffffffffc0323400 (=0xffffffc000323400 via alias) rounds=24 rc=1sugate7-patch written (NOP at 0x323400); caller must witness by execve of 
+07-03 10:16:33.759  4725  4743 I TempRoot-boot: staged /data/user/0/com.xplay6.temproot/files/nsmbind bytes=2169624 canExec=true
+07-03 10:16:34.052  4725  4743 I TempRoot-boot:   nsmbind: ns: joined PID 1's mount namespace|published /data/local/tmp/.sud/nsmbind/su|published /data/local/tmp/.sud/nsmbind/sux|OK bound 2 name(s) from /data/local/tmp/
+07-03 10:16:34.514  4725  4743 I TempRoot-boot:   PATH witness: drwxr-xr-x 2 root root 4096 2018-07-02 13:30 /sbin|-rwxr-xr-x 1 root root u:object_r:shell_data_file:s0 2143768 2018-07-03 10:16 /sbin/sux
+07-03 10:16:34.520  4725  4743 I TempRoot-boot:   app-exec su: execve allowed (out=usage: su [-c <cmd>] [uid]   (temp-root sud client)|)
+07-03 10:16:34.560  4725  4743 I TempRoot-boot: relay: started (audit trail: /storage/emulated/0/Android/data/com.xplay6.temproot/files/relayd.log)
+07-03 10:16:34.568  4725  5348 I TempRoot-boot: daemon probe :12346 answered -- daemon is up
+07-03 10:26:34.643  4725  6217 I TempRoot-boot: daemon probe :12346 answered -- daemon is up

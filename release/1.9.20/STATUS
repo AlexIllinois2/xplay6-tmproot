@@ -1,0 +1,37 @@
+STATUS 1.9.20 —— 「USB模拟点击」这条：能力已验，交付＝工装＋程序（无 APK 变更）
+判据面全部取自设备现读；分母随读数一起报。取证正文＝包内 art/ledger-20261021.md §691–§701。
+
+VERIFIED（设备 3e5a38a5・PD1610・Android 7.1.1・Enforcing）
+  1 判决点  system_server `VivoPackageManagerSerivceUtils.preCheckUidPermission`：只拦 uid 2000；放行＝
+    `Secure vivo_adb_simulate_input==1` 或 `vivo_monkey_test==1` 或 `ADB_SHELL_SIMULATE_PROP`；返回 -100 →
+    `InputManagerService:1468 checkPermission(INJECT_EVENTS)==0` 为假 → native `Permission denied: injecting event … uid 2000`。
+    ★判决链里**没有任何账号／登录态**。
+  2 登录门禁只在 UI  `com.android.settings.DevelopmentSettings`：弹框正按钮**先读**
+    `SharedPreferences("development").getBoolean("account_verified_ok")`，真则直接写 1、不问账号；失败/超时分支写回 0。
+    屏上那页 `com.vivo.settings.DevelopmentSettingsActivity2` 只是壳（`getIntent()` 塞的就是这个 fragment）。
+  3 生效即时  PKMS 对该 Secure URI 挂 ContentObserver（日志 `Observer change, Is allow adb simulate input ? true`），不重启。
+  4 跨开机存活  拨成 1 → `adb reboot` → 起来仍读 **1**；同趟本次开机 `allow adb simulate` 日志 **0 条**（＝没人写过，初读即 1）。
+  5 功能面  `input keyevent 4` 改变 `mCurrentFocus`（0→0 条 denial 增量）；`input tap 950 558` 令
+    `screen_brightness_mode` **1→0**，再打一发改回 **1**（探针自复原）。重启后复测同形。
+  6 装包无人  `tools/install_tap.py`（`TAPBACKEND=adb`）对 1.9.19 出货包：`继续安装`→`安装` 两发
+    `landed=2 refused=0` → `install output: Success`。此前同一台机四条 adb 走法全 `Failure [-200]`（§604/§606）。
+  7 尺自检  `install_tap.py --selftest` **5/5 arms ok**（含"夹具仍带陷阱"那一臂）；`runbook_citations` **134/134** repo/pattern 路径可解・205 token 全分类。
+  8 写这枚键的通路分母  `/system` 下 **292 枚 `.odex` 全扫**：命中只有 `services.odex`(1)・`Settings.odex`(1)。
+
+REFUSED / 未判（不算绿也不算红）
+  · `account_verified_ok` 那枚 pref 的盘上现证：本次开机 root 通道未起 → `unlock_adb_input.py --check` 打 REFUSED。
+  · `ADB_SHELL_SIMULATE_PROP` 的属性名（`<clinit>` jadx 丢段）；`INTERCEPT_SHELL_PERMISSION_LIST` 的成员。
+  · 上一次读到 0 的成因（只有那枚页面会写）：是机主拨回还是校验失败分支写的，没有证人，不指派。
+
+边界（明说的边界，不是欠项）
+  · ★最后那一下**必须人拨**：root 写不了这枚值——daemon 的 root shell **没有任何 servicemanager 查询能力**
+    （`dumpsys window`→`Can't find service: window`；`settings put`→`IActivityManager` NPE）。⇒ "开机自动置 1"做不到。
+  · ★pref 只能落 `/data/user_de/0/com.android.settings/shared_prefs/`（manifest `defaultToDeviceProtectedStorage=true`）；
+    写 CE 那处会**静默读到 false**。
+  · ★解开后**任何接上这台机的 ADB 都能注入点击**（厂商留的安全边界）。
+  · `input tap` 要打在行的**开关侧**；两段安装框按钮同坐标 `(540,1662)`，文案依次『继续安装』→『安装』。
+  · `adb root` 已判：**这台机上结构性不可能**（adbd 自降到 uid 2000），代它发 `ctl.restart adbd` 会把 USB 整个打掉、要人重启才回 → 不推进。
+
+仍欠（下一格）
+  · `install_and_verify.sh` 的前置闸：读到 `vivo_adb_simulate_input=0` 就 REFUSE 并吐解锁指令，不再白烧 14 s 窗口。
+  · 设备上留着没还：`svc power stayon true`（还＝`svc power stayon false`）。

@@ -1,0 +1,4 @@
+# 在此目录内校验：sha256sum -c SHA256SUMS.txt（这三行是交付面文件，tar 不含它们以免自指；本格无 APK／原生件，见 README-build.txt）
+a41691aa73a94ac740b695f4f573f9943804411db93041d09c9fae057f7a725e  usb-simulate-click-tools.tar.gz
+39fd4375927a660ce104f80516e078b120d497614b3b41d35f026efff3f3b236  README-build.txt
+a41026bbb201819b5a9910a74c1dd52e6f0f60da68fc60ec6d634fc75b70a03d  STATUS

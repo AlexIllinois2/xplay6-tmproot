@@ -24,6 +24,60 @@
 #define EBMP_SPAN       384   /* EBITMAP_UNIT_NUMS(6) * 64 */
 #define EBMP_MAX_NODES  4     /* what fits in modprobe_path's tail (256 - 0x48) */
 
+/* Is a node whose window starts at `startbit` legal AFTER one that starts at `prev`?
+ *
+ * ebitmap_get_bit walks the chain while node->startbit <= bit and RETURNS from the first node whose
+ * window covers the bit.  So an overlapping earlier window silently masks a later node's bits, and a
+ * non-ascending chain ends the walk early -- both look like "this type is not exempt" while the bytes
+ * say otherwise.  The on-device walker rejects these instead of decoding them (ledger 2026-10-21),
+ * and this one predicate is what both the device and the host test agree on. */
+#define EBMP_CHAIN_OK       0
+#define EBMP_CHAIN_BAD_ORDER 1   /* not strictly above the previous startbit */
+#define EBMP_CHAIN_BAD_SHADOW 2  /* overlaps the previous window: it would mask bits in it */
+
+static inline int ebmp_chain_step(unsigned int prev, int have_prev, unsigned int startbit)
+{
+    if (!have_prev)
+        return EBMP_CHAIN_OK;
+    if (startbit <= prev)
+        return EBMP_CHAIN_BAD_ORDER;
+    if (startbit < prev + EBMP_SPAN)
+        return EBMP_CHAIN_BAD_SHADOW;
+    return EBMP_CHAIN_OK;
+}
+
+/* Judge a finished chain walk.  This is a function, not an inline condition in the walker, because the
+ * first version of the on-device walker got the node COUNT wrong (it broke out of the loop with the
+ * loop index one short of the nodes it had decoded, and accused a correct 3-node plant of being a
+ * 2-node one -- 2026-10-21, /data/local/tmp/b2.log).  An off-by-one is exactly what an arm catches and
+ * a device log only notices after a boot is wasted.
+ *
+ *   seen        nodes whose bytes were actually decoded
+ *   terminated  1 when the walk stopped on a NULL `next` (0 = it ran to the walk limit)
+ *   nwant       how many nodes the caller planted, or -1 when it is just reading
+ *   highbit     the ebitmap head's highbit
+ *   nbits       bits collected
+ */
+/* pass this as nwant when the caller is only reading and is not asserting a shape */
+#define EBMP_JUST_READING (-1)
+
+#define EBMP_WALK_OK        0
+#define EBMP_WALK_TRUNCATED 1   /* never reached a NULL next: a merge built on this would drop the tail */
+#define EBMP_WALK_EMPTY     2   /* highbit says bits exist, the walk found none -> a lying read */
+#define EBMP_WALK_COUNT     3   /* not the shape the caller just wrote -> a stale aim */
+
+static inline int ebmp_walk_verdict(int seen, int terminated, int nwant,
+                                    unsigned long long highbit, int nbits)
+{
+    if (!terminated)
+        return EBMP_WALK_TRUNCATED;
+    if (highbit > 0 && nbits == 0)
+        return EBMP_WALK_EMPTY;
+    if (nwant >= 0 && seen != nwant)
+        return EBMP_WALK_COUNT;
+    return EBMP_WALK_OK;
+}
+
 struct ebmp_window {
     unsigned int startbit;
     unsigned int first;    /* index into the sorted bit array */
@@ -108,6 +162,21 @@ static inline int ebmp_build(const unsigned int *bits, int n, unsigned long long
     ebmp_put32(head + 8, maxb);
     ebmp_put32(head + 12, 0);
     return nw;
+}
+
+/* The maps[j] word as the KERNEL lays it out, given the node read back as an array of 16 u32 units
+ * (which is exactly what the getgroups read channel hands us): maps[] starts at byte 8 = unit 2 and
+ * each u64 word is {low unit, high unit} = {2+2j, 3+2j}.
+ *
+ * An off-by-one here reads the NEXT word's low half as this word's high half, and worse, reads
+ * startbit (unit 14) as maps[5]'s high half.  Measured 2026-10-21: that version reported
+ * "9 247 279 361 364" for a node that really held "9 192 279" -- 247/361/364 were phantoms of the
+ * mis-slotted halves, 192 was invisible because its mask lives in a high half, and the ladder spent
+ * three boots blaming a correct plant.  Kept as a function so the host arms can pin it against the
+ * byte-level view the builder writes. */
+static inline unsigned long long ebmp_maps_word(const unsigned int *nd, int j)
+{
+    return (unsigned long long)nd[3 + j * 2] << 32 | nd[2 + j * 2];
 }
 
 /* Mirror of the kernel's ebitmap_get_bit, over buffers built by ebmp_build -- so a test can assert

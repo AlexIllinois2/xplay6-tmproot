@@ -1,0 +1,5 @@
+PATH exec witness CLOSED for the app domain (untrusted_app exec /sbin/su -> uid=0): an untrusted_app caller (uid 10134) exec-ed /sbin/su from PATH and got uid=0(root)+Enforcing; relayd logged "allow uid=10134 -> sud (SU 0 id; getenforce ...)". Earlier shell EPERM was the shell domain, not the app domain.
+nsmbind now binds PER NAME (su,sux in one call): /sbin/su and /sbin/sux both real 2143768-byte ELFs. Relay re-arms after an APK reinstall kills the app process: am startservice -> "listening on @sud (uid=10151)".
+Tally on this line: PASS A1 A2 B C D E1 E2 H J G(mode=post-reboot, coverage 1/1). Grants reset to 10151 only. Not yet done: the app-side openSuName7 single-call bind has only been proven with the dev-side binary; it lands on the next chain run (boot or a needle).
+
+CORRECTION (ledger 637): the two real /sbin ELFs on this boot were published by my DEV-side nsmbind8 run, not by the app; 1.9.11's openSuName7 has never executed (the boot chain ran on versionCode 31). Also the shipped one-needle-per-boot cap left the daemon dead-unrecovered within the boot: logcat says "one recovery needle is already spent -- standing by". Needs a product decision.

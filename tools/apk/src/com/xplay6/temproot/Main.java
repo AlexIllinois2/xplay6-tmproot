@@ -1,69 +1,85 @@
 package com.xplay6.temproot;
 
 import android.app.Activity;
-import android.content.pm.PackageManager;
-import android.graphics.Color;
-import android.graphics.Typeface;
 import android.graphics.drawable.ColorDrawable;
-import android.graphics.drawable.GradientDrawable;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.text.Editable;
+import android.text.InputType;
+import android.text.TextUtils;
+import android.text.TextWatcher;
 import android.util.Log;
 import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.inputmethod.EditorInfo;
 import android.widget.BaseAdapter;
+import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ListView;
+import android.widget.ProgressBar;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Set;
 
-/* One screen: a status card, the Su allow list, and a collapsible log.
- *
- * The list is the whole point of the design: it shows every installable application
- * with the uid the daemon will attribute to it, and the pills decide the allow
- * list.  Nothing here creates a `su` for anyone -- an app that is off has no channel
- * to find, so "被拒绝" and "不存在" look identical from the outside.
- *
- * Look is Material 3 dark: the KernelSU reference APK is Compose-only and minSdk 31,
- * so it cannot be run on this API 23 device to be sampled.  Colours are the spec's
- * own dark baseline roles, metrics are its layout's (16dp page, 64dp rows, 40dp
- * icons, 52x32 pill with a 24dp thumb, 15sp title / 12sp supporting).
- */
+/* KernelSU-style shell: a status home page, a searchable app permission page and a
+ * grouped settings page, with the daemon log as its own screen.  The allow list is
+ * still the product: a row's switch IS the decision, written to disk right away. */
 public final class Main extends Activity {
 
-    static final int C_BG = 0xFF1C1B1F;
-    static final int C_CARD = 0xFF2B2930;
-    static final int C_CARD_HI = 0xFF36343B;
-    static final int C_TEXT = 0xFFE6E1E5;
-    static final int C_MUTED = 0xFFCAC4D0;
-    static final int C_OUTLINE = 0xFF938F99;
-    static final int C_PRIMARY = 0xFFD0BCFF;
-    static final int C_ON_PRIMARY = 0xFF381E72;
-    static final int C_DIVIDER = 0x14E6E1E5;
+    private static final int PAGE_HOME = 0, PAGE_APPS = 1, PAGE_SETTINGS = 2;
 
-    /* Typeface.NORMAL is an int style, not a Typeface -- text() takes the face. */
-    static final Typeface TF = Typeface.create("sans-serif", Typeface.NORMAL);
-
+    private Ui u;
     private final Handler ui = new Handler(Looper.getMainLooper());
+
     private final List<Chain.Entry> all = new ArrayList<Chain.Entry>();
     private final List<Chain.Entry> rows = new ArrayList<Chain.Entry>();
     private final Set<String> checked = new HashSet<String>();
-
-    private TextView logBody, logHead, statusLine, countLine, systemChip;
-    private ScrollView logScroll;
-    private ListView list;
     private boolean showSystem;
+    private boolean appsLoaded, loading;
+    private int page = PAGE_HOME;
+
+    private final FrameLayout[] pages = new FrameLayout[3];
+    private final View[] navItems = new View[3];
+    private final FrameLayout[] navPills = new FrameLayout[3];
+    private final ImageView[] navIcons = new ImageView[3];
+    private final TextView[] navLabels = new TextView[3];
+    private int[] navGlyphs = { Ui.HOME, Ui.APPS, Ui.SETTINGS };
+
+    private TextView heroTitle, heroDetail, statGrants, statSe, statSu, escalateLabel;
+    private FrameLayout heroBadge;
+    private ImageView heroIcon;
+    private View escalateBtn, refreshBtn;
+    private LinearLayout escalateProgress;
+    private boolean escalating;
+    private LinearLayout homeGrantedList;
+    private TextView homeGrantedCount;
+
+    private BaseAdapter adapter;
+    private ListView list;
+    private EditText search;
+    private TextView listSummary, sysToggleSub, emptyView;
+    private Ui.Toggle sysToggle;
+
+    private LinearLayout gainRow601, gainRowStock;
+    private ImageView gainCheck601, gainCheckStock;
+    private TextView gainNote;
+
+    private FrameLayout logOverlay;
+    private TextView logBody;
+    private ScrollView logScroll;
     private boolean logOpen;
 
     private final Chain.Log logger = new Chain.Log() {
@@ -73,285 +89,476 @@ public final class Main extends Activity {
             ui.post(new Runnable() {
                 @Override
                 public void run() {
-                    logBody.append(s + "\n");
-                    logScroll.post(new Runnable() {
-                        @Override
-                        public void run() {
-                            logScroll.fullScroll(ScrollView.FOCUS_DOWN);
-                        }
-                    });
+                    appendLog(s);
                 }
             });
-        }
-    };
-
-    /* Section titles ride in the same list as the apps, smuggled in as an Entry with
-     * no package name -- and disabled, so tapping one cannot toggle anything. */
-    private final BaseAdapter adapter = new BaseAdapter() {
-        @Override
-        public int getCount() {
-            return rows.size();
-        }
-
-        @Override
-        public Object getItem(int pos) {
-            return rows.get(pos);
-        }
-
-        @Override
-        public long getItemId(int pos) {
-            return pos;
-        }
-
-        @Override
-        public int getViewTypeCount() {
-            return 2;
-        }
-
-        @Override
-        public int getItemViewType(int pos) {
-            return isHeader(rows.get(pos)) ? 0 : 1;
-        }
-
-        @Override
-        public boolean areAllItemsEnabled() {
-            return false;
-        }
-
-        @Override
-        public boolean isEnabled(int pos) {
-            return !isHeader(rows.get(pos));
-        }
-
-        @Override
-        public View getView(int pos, View cv, ViewGroup parent) {
-            Chain.Entry e = rows.get(pos);
-            return isHeader(e) ? headerRow(cv, e) : appRow(cv, e);
         }
     };
 
     @Override
     protected void onCreate(Bundle saved) {
         super.onCreate(saved);
+        u = new Ui(this);
+        getWindow().setStatusBarColor(Ui.BG);
+        getWindow().setNavigationBarColor(Ui.BG);
 
-        getWindow().setStatusBarColor(C_BG);
-        getWindow().setNavigationBarColor(C_BG);
+        FrameLayout root = new FrameLayout(this);
+        root.setBackgroundColor(Ui.BG);
 
-        LinearLayout page = new LinearLayout(this);
-        page.setOrientation(LinearLayout.VERTICAL);
-        page.setBackgroundColor(C_BG);
-        page.setPadding(dp(16), dp(20), dp(16), dp(12));
+        LinearLayout shell = new LinearLayout(this);
+        shell.setOrientation(LinearLayout.VERTICAL);
 
-        TextView title = text("月虹提权助手", 22, C_TEXT, Typeface.create("sans-serif", Typeface.BOLD));
-        title.setLetterSpacing(-0.01f);
-        page.addView(title);
-        TextView sub = text("仅内存态提权 · 重启即回到出厂状态", 12, C_MUTED, TF);
-        LinearLayout.LayoutParams subLp = new LinearLayout.LayoutParams(-1, -2);
-        subLp.topMargin = dp(4);
-        subLp.bottomMargin = dp(14);
-        page.addView(sub, subLp);
-
-        LinearLayout card = new LinearLayout(this);
-        card.setOrientation(LinearLayout.VERTICAL);
-        card.setBackground(round(C_CARD, 14));
-        card.setPadding(dp(16), dp(14), dp(16), dp(14));
-
-        statusLine = text("状态读取中…", 14, C_TEXT, TF);
-        card.addView(statusLine);
-        countLine = text("", 12, C_MUTED, TF);
-        LinearLayout.LayoutParams cntLp = new LinearLayout.LayoutParams(-1, -2);
-        cntLp.topMargin = dp(3);
-        card.addView(countLine, cntLp);
-
-        LinearLayout actions = new LinearLayout(this);
-        actions.setOrientation(LinearLayout.HORIZONTAL);
-        LinearLayout.LayoutParams actLp = new LinearLayout.LayoutParams(-1, -2);
-        actLp.topMargin = dp(12);
-        actions.addView(chip("提权", new Runnable() {
-            @Override
-            public void run() {
-                openLog();
-                logger.line("--- escalate ---");
-                Chain.run(Main.this, logger, 24);
-                status();
-            }
-        }));
-        actions.addView(chip("刷新", new Runnable() {
-            @Override
-            public void run() {
-                refresh();
-                status();
-            }
-        }));
-        systemChip = chip("系统应用：隐藏", null);
-        systemChip.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                showSystem = !showSystem;
-                styleSystemChip();
-                ui.post(new Runnable() {
-                    @Override
-                    public void run() {
-                        rebuild();
-                    }
-                });
-            }
-        });
-        actions.addView(systemChip);
-        card.addView(actions, actLp);
-        page.addView(card);
-
-        list = new ListView(this);
-        list.setAdapter(adapter);
-        list.setBackgroundColor(Color.TRANSPARENT);
-        list.setDivider(new ColorDrawable(C_DIVIDER));
-        list.setDividerHeight(1);
-        list.setSelector(new ColorDrawable(Color.TRANSPARENT));
-        list.setCacheColorHint(Color.TRANSPARENT);
-        list.setFadingEdgeLength(0);
-        /* The classic scrollbar thumb lands on top of the pills at this density, and
-         * a Compose-era list does not draw one -- so it is off, not styled. */
-        list.setVerticalScrollBarEnabled(false);
-        list.setClipToPadding(false);
-        list.setPadding(0, dp(4), 0, dp(10));
-        page.addView(list, new LinearLayout.LayoutParams(-1, 0, 1f));
-
-        LinearLayout tools = new LinearLayout(this);
-        tools.setOrientation(LinearLayout.HORIZONTAL);
-        tools.addView(chip("测 su 名字闸", new Runnable() {
-            @Override
-            public void run() {
-                openLog();
-                Chain.suNameProbe(Main.this, logger);
-            }
-        }));
-        tools.addView(chip("撤销全部", new Runnable() {
-            @Override
-            public void run() {
-                openLog();
-                checked.clear();
-                ArrayList<Integer> only = new ArrayList<Integer>();
-                only.add(Integer.valueOf(android.os.Process.myUid()));
-                boolean ok = Chain.writeGrants(Main.this, only);
-                logger.line("已撤销除管理端以外的全部授权 saved=" + ok);
-                refresh();
-            }
-        }));
-        tools.addView(chip("授权日志", new Runnable() {
-            @Override
-            public void run() {
-                openLog();
-                logger.line("su log:\n" + Chain.suLog());
-            }
-        }));
-        LinearLayout.LayoutParams toolsLp = new LinearLayout.LayoutParams(-1, -2);
-        toolsLp.topMargin = dp(10);
-        page.addView(tools, toolsLp);
-
-        logHead = text("运行日志      点按展开", 12, C_PRIMARY, TF);
-        logHead.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                setLogOpen(!logOpen);
-            }
-        });
-        LinearLayout.LayoutParams headLp = new LinearLayout.LayoutParams(-1, -2);
-        headLp.topMargin = dp(12);
-        headLp.bottomMargin = dp(6);
-        page.addView(logHead, headLp);
-
-        logBody = text("", 11, C_MUTED, Typeface.MONOSPACE);
-        logBody.setTextIsSelectable(true);
-        logScroll = new ScrollView(this);
-        logScroll.setBackground(round(C_CARD, 14));
-        logScroll.addView(logBody);
-        logScroll.setVisibility(View.GONE);
-        page.addView(logScroll, new LinearLayout.LayoutParams(-1, dp(120)));
-
-        setContentView(page);
-
-        styleSystemChip();
-        Chain.useToken(this);
-        /* Read it from the package, never from a literal: the log line used to say
-         * "1.4" while the manifest had moved on, which is the kind of lie that makes a
-         * later reader distrust every other line in this log. */
-        String ver;
-        try {
-            ver = getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
-        } catch (Throwable t) {
-            ver = "未知版本";
+        FrameLayout host = new FrameLayout(this);
+        pages[PAGE_HOME] = new FrameLayout(this);
+        pages[PAGE_APPS] = new FrameLayout(this);
+        pages[PAGE_SETTINGS] = new FrameLayout(this);
+        for (int i = 0; i < pages.length; i++) {
+            pages[i].setBackgroundColor(Ui.BG);
+            host.addView(pages[i], new FrameLayout.LayoutParams(-1, -1));
+            pages[i].setVisibility(i == PAGE_HOME ? View.VISIBLE : View.GONE);
         }
-        logger.line("月虹提权助手 " + ver + " · 仅内存态：重启回到出厂；未提权时任何 PATH 上都没有 su");
+        pages[PAGE_HOME].addView(buildHome(), new FrameLayout.LayoutParams(-1, -1));
+        pages[PAGE_APPS].addView(buildApps(), new FrameLayout.LayoutParams(-1, -1));
+        pages[PAGE_SETTINGS].addView(buildSettings(), new FrameLayout.LayoutParams(-1, -1));
+
+        shell.addView(host, new LinearLayout.LayoutParams(-1, 0, 1f));
+        shell.addView(buildNav(), new LinearLayout.LayoutParams(-1, -2));
+        root.addView(shell, new FrameLayout.LayoutParams(-1, -1));
+        root.addView(buildLogOverlay(), new FrameLayout.LayoutParams(-1, -1));
+        setContentView(root);
+
+        styleNav();
+        Chain.useToken(this);
+        logger.line("xplay6 tmproot " + versionName()
+                + " · 仅内存态：重启回到出厂；未提权时任何 PATH 上都没有 su");
+        updateGainSettings();
+        rebuild();
         refresh();
         status();
     }
 
-    /* The buttons and rows run their body on a worker thread (the chain blocks for
-     * tens of seconds), so the query happens there and only the view update is posted
-     * back to the UI thread -- calling notifyDataSetChanged() from the worker threw
-     * CalledFromWrongThreadException and took the app down. */
-    private void refresh() {
-        new Thread(new Runnable() {
+    /* ---------------------------------------------------------------- home */
+
+    private View buildHome() {
+        ScrollView sv = new ScrollView(this);
+        sv.setFillViewport(true);
+        sv.setVerticalScrollBarEnabled(false);
+        LinearLayout col = new LinearLayout(this);
+        col.setOrientation(LinearLayout.VERTICAL);
+        col.setPadding(u.dp(20), u.dp(18), u.dp(20), u.dp(24));
+        sv.addView(col, new ScrollView.LayoutParams(-1, -2));
+
+        TextView title = u.heading("xplay6 tmproot", 28, Ui.TEXT);
+        col.addView(title);
+        TextView sub = u.text("内存态 root · 重启即复原 · v" + versionName(), 13, Ui.MUTED, Ui.REG);
+        LinearLayout.LayoutParams subLp = new LinearLayout.LayoutParams(-1, -2);
+        subLp.topMargin = u.dp(5);
+        col.addView(sub, subLp);
+
+        LinearLayout hero = new LinearLayout(this);
+        hero.setOrientation(LinearLayout.VERTICAL);
+        hero.setBackground(u.shape(Ui.SURFACE, 24));
+        hero.setPadding(u.dp(20), u.dp(20), u.dp(20), u.dp(18));
+        LinearLayout.LayoutParams heroLp = new LinearLayout.LayoutParams(-1, -2);
+        heroLp.topMargin = u.dp(20);
+        col.addView(hero, heroLp);
+
+        LinearLayout statusRow = new LinearLayout(this);
+        statusRow.setGravity(Gravity.CENTER_VERTICAL);
+        heroBadge = new FrameLayout(this);
+        heroBadge.setBackground(u.shape(0x26F2CC7B, 24));
+        heroIcon = u.icon(Ui.SHIELD, Ui.AMBER, 24);
+        heroBadge.addView(heroIcon);
+        statusRow.addView(heroBadge, new LinearLayout.LayoutParams(u.dp(48), u.dp(48)));
+        LinearLayout statusText = new LinearLayout(this);
+        statusText.setOrientation(LinearLayout.VERTICAL);
+        heroTitle = u.heading("正在读取…", 19, Ui.TEXT);
+        statusText.addView(heroTitle);
+        heroDetail = u.text("正在读取 SELinux 与 su 状态…", 12, Ui.MUTED, Ui.REG);
+        heroDetail.setLineSpacing(u.dp(3), 1f);
+        LinearLayout.LayoutParams dlp = new LinearLayout.LayoutParams(-1, -2);
+        dlp.topMargin = u.dp(4);
+        statusText.addView(heroDetail, dlp);
+        LinearLayout.LayoutParams stlp = new LinearLayout.LayoutParams(0, -2, 1f);
+        stlp.leftMargin = u.dp(14);
+        statusRow.addView(statusText, stlp);
+        hero.addView(statusRow);
+
+        LinearLayout stats = new LinearLayout(this);
+        stats.setOrientation(LinearLayout.HORIZONTAL);
+        statGrants = u.text("—", 17, Ui.TEXT, Ui.MED);
+        statSe = u.text("—", 17, Ui.TEXT, Ui.MED);
+        statSu = u.text("—", 17, Ui.TEXT, Ui.MED);
+        stats.addView(statCell("已授权应用", statGrants), new LinearLayout.LayoutParams(0, -2, 1f));
+        stats.addView(statCell("SELinux", statSe), new LinearLayout.LayoutParams(0, -2, 1f));
+        stats.addView(statCell("su", statSu), new LinearLayout.LayoutParams(0, -2, 1f));
+        LinearLayout.LayoutParams statsLp = new LinearLayout.LayoutParams(-1, -2);
+        statsLp.topMargin = u.dp(20);
+        hero.addView(stats, statsLp);
+
+        LinearLayout actions = new LinearLayout(this);
+        actions.setGravity(Gravity.CENTER_VERTICAL);
+        escalateBtn = u.text("提权", 15, Ui.ON_PRIMARY, Ui.MED);
+        ((TextView) escalateBtn).setGravity(Gravity.CENTER);
+        escalateLabel = (TextView) escalateBtn;
+        escalateBtn.setBackground(u.press(u.shape(Ui.PRIMARY, 24)));
+        escalateBtn.setClickable(true);
+        escalateBtn.setOnClickListener(new View.OnClickListener() {
             @Override
-            public void run() {
-                final List<Chain.Entry> got = Chain.listApps(Main.this);
-                ui.post(new Runnable() {
-                    @Override
-                    public void run() {
-                        all.clear();
-                        all.addAll(got);
-                        checked.clear();
-                        for (Chain.Entry e : all)
-                            if (e.granted)
-                                checked.add(e.pkg);
-                        rebuild();
-                    }
-                });
+            public void onClick(View v) {
+                escalate();
             }
-        }).start();
+        });
+        actions.addView(escalateBtn, new LinearLayout.LayoutParams(0, u.dp(48), 1f));
+        refreshBtn = u.text("刷新", 14, Ui.PRIMARY, Ui.MED);
+        ((TextView) refreshBtn).setGravity(Gravity.CENTER);
+        refreshBtn.setBackground(u.press(u.shape(0x00000000, 24, 1, Ui.OUTLINE)));
+        refreshBtn.setClickable(true);
+        refreshBtn.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                refresh();
+                status();
+            }
+        });
+        LinearLayout.LayoutParams rlp = new LinearLayout.LayoutParams(u.dp(92), u.dp(48));
+        rlp.leftMargin = u.dp(10);
+        actions.addView(refreshBtn, rlp);
+        LinearLayout.LayoutParams actLp = new LinearLayout.LayoutParams(-1, -2);
+        actLp.topMargin = u.dp(18);
+        hero.addView(actions, actLp);
+
+        escalateProgress = new LinearLayout(this);
+        escalateProgress.setGravity(Gravity.CENTER_VERTICAL);
+        ProgressBar pb = new ProgressBar(this, null, android.R.attr.progressBarStyleSmall);
+        try {
+            pb.getIndeterminateDrawable().setTint(Ui.PRIMARY);
+        } catch (Throwable ignore) {
+        }
+        LinearLayout.LayoutParams pblp = new LinearLayout.LayoutParams(u.dp(18), u.dp(18));
+        pblp.rightMargin = u.dp(8);
+        escalateProgress.addView(pb, pblp);
+        escalateProgress.addView(u.text("正在执行提权链，过程写在「运行日志」里", 12, Ui.MUTED, Ui.REG));
+        escalateProgress.setVisibility(View.GONE);
+        LinearLayout.LayoutParams elp = new LinearLayout.LayoutParams(-1, -2);
+        elp.topMargin = u.dp(12);
+        hero.addView(escalateProgress, elp);
+
+        LinearLayout grantedCard = new LinearLayout(this);
+        grantedCard.setOrientation(LinearLayout.VERTICAL);
+        grantedCard.setBackground(u.shape(Ui.SURFACE, 18));
+        grantedCard.setClipToOutline(true);
+        grantedCard.setPadding(u.dp(16), u.dp(12), u.dp(16), u.dp(8));
+        LinearLayout grantedHead = new LinearLayout(this);
+        grantedHead.setGravity(Gravity.CENTER_VERTICAL);
+        grantedHead.addView(u.text("已授权应用", 14, Ui.TEXT, Ui.MED),
+                new LinearLayout.LayoutParams(0, -2, 1f));
+        homeGrantedCount = u.text("", 12, Ui.MUTED, Ui.REG);
+        grantedHead.addView(homeGrantedCount);
+        TextView manage = u.text("管理", 12, Ui.PRIMARY, Ui.MED);
+        LinearLayout.LayoutParams mlp0 = new LinearLayout.LayoutParams(-2, -2);
+        mlp0.leftMargin = u.dp(8);
+        grantedHead.addView(manage, mlp0);
+        ImageView manageChevron = u.icon(Ui.CHEVRON, Ui.PRIMARY, 14);
+        LinearLayout.LayoutParams mclp = new LinearLayout.LayoutParams(u.dp(14), u.dp(14));
+        mclp.leftMargin = u.dp(2);
+        grantedHead.addView(manageChevron, mclp);
+        grantedHead.setBackground(u.press(u.shape(0x00000000, 0)));
+        grantedHead.setClickable(true);
+        grantedHead.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                showPage(PAGE_APPS);
+            }
+        });
+        grantedCard.addView(grantedHead, new LinearLayout.LayoutParams(-1, -2));
+        homeGrantedList = new LinearLayout(this);
+        homeGrantedList.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout.LayoutParams hglp = new LinearLayout.LayoutParams(-1, -2);
+        hglp.topMargin = u.dp(4);
+        grantedCard.addView(homeGrantedList, hglp);
+        LinearLayout.LayoutParams gcLp = new LinearLayout.LayoutParams(-1, -2);
+        gcLp.topMargin = u.dp(14);
+        col.addView(grantedCard, gcLp);
+
+        LinearLayout logRow = new LinearLayout(this);
+        logRow.setGravity(Gravity.CENTER_VERTICAL);
+        logRow.setBackground(u.press(u.shape(Ui.SURFACE, 18)));
+        logRow.setPadding(u.dp(16), u.dp(14), u.dp(14), u.dp(14));
+        logRow.addView(u.icon(Ui.LOG, Ui.PRIMARY, 20),
+                new LinearLayout.LayoutParams(u.dp(20), u.dp(20)));
+        LinearLayout logText = new LinearLayout(this);
+        logText.setOrientation(LinearLayout.VERTICAL);
+        logText.addView(u.text("运行日志", 14, Ui.TEXT, Ui.MED));
+        TextView logSub = u.text("提权链每一步都记在这里", 12, Ui.MUTED, Ui.REG);
+        LinearLayout.LayoutParams lslp = new LinearLayout.LayoutParams(-1, -2);
+        lslp.topMargin = u.dp(2);
+        logText.addView(logSub, lslp);
+        LinearLayout.LayoutParams ltlp = new LinearLayout.LayoutParams(0, -2, 1f);
+        ltlp.leftMargin = u.dp(14);
+        logRow.addView(logText, ltlp);
+        logRow.addView(u.icon(Ui.CHEVRON, Ui.MUTED, 16),
+                new LinearLayout.LayoutParams(u.dp(16), u.dp(16)));
+        logRow.setClickable(true);
+        logRow.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                openLog();
+            }
+        });
+        LinearLayout.LayoutParams logLp = new LinearLayout.LayoutParams(-1, -2);
+        logLp.topMargin = u.dp(14);
+        col.addView(logRow, logLp);
+
+        LinearLayout info = new LinearLayout(this);
+        info.setBackground(u.shape(Ui.SURFACE, 18, 1, Ui.OUTLINE));
+        info.setPadding(u.dp(16), u.dp(14), u.dp(16), u.dp(14));
+        info.addView(u.icon(Ui.INFO, Ui.PRIMARY, 18),
+                new LinearLayout.LayoutParams(u.dp(18), u.dp(18)));
+        LinearLayout infoText = new LinearLayout(this);
+        infoText.setOrientation(LinearLayout.VERTICAL);
+        infoText.addView(u.text("仅本次开机有效", 13, Ui.TEXT, Ui.MED));
+        TextView infoBody = u.text("提权只改运行内存与 SELinux 运行表，不刷机、不写分区；重启后自动回到出厂状态。",
+                12, Ui.MUTED, Ui.REG);
+        infoBody.setLineSpacing(u.dp(3), 1f);
+        LinearLayout.LayoutParams iblp = new LinearLayout.LayoutParams(-1, -2);
+        iblp.topMargin = u.dp(3);
+        infoText.addView(infoBody, iblp);
+        LinearLayout.LayoutParams itlp = new LinearLayout.LayoutParams(0, -2, 1f);
+        itlp.leftMargin = u.dp(12);
+        info.addView(infoText, itlp);
+        LinearLayout.LayoutParams infoLp = new LinearLayout.LayoutParams(-1, -2);
+        infoLp.topMargin = u.dp(14);
+        col.addView(info, infoLp);
+
+        return sv;
     }
 
-    private void rebuild() {
-        List<Chain.Entry> on = new ArrayList<Chain.Entry>();
-        List<Chain.Entry> other = new ArrayList<Chain.Entry>();
-        List<Chain.Entry> sys = new ArrayList<Chain.Entry>();
-        int hidden = 0;
+    private LinearLayout statCell(String label, TextView value) {
+        LinearLayout c = new LinearLayout(this);
+        c.setOrientation(LinearLayout.VERTICAL);
+        c.addView(value);
+        TextView l = u.text(label, 11, Ui.MUTED, Ui.REG);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, -2);
+        lp.topMargin = u.dp(3);
+        c.addView(l, lp);
+        return c;
+    }
 
-        for (Chain.Entry e : all) {
-            if (e.system) {
-                if (!showSystem) {
-                    hidden++;
-                    continue;
-                }
-                sys.add(e);
-            } else if (checked.contains(e.pkg)) {
-                on.add(e);
-            } else {
-                other.add(e);
+    /* ---------------------------------------------------------------- apps */
+
+    private View buildApps() {
+        LinearLayout pageRoot = new LinearLayout(this);
+        pageRoot.setOrientation(LinearLayout.VERTICAL);
+
+        LinearLayout head = new LinearLayout(this);
+        head.setOrientation(LinearLayout.VERTICAL);
+        head.setPadding(u.dp(20), u.dp(18), u.dp(20), 0);
+        head.addView(u.heading("应用授权", 28, Ui.TEXT));
+        TextView sub = u.text("点按一行即写入授权名单，不需要保存", 13, Ui.MUTED, Ui.REG);
+        LinearLayout.LayoutParams subLp = new LinearLayout.LayoutParams(-1, -2);
+        subLp.topMargin = u.dp(5);
+        head.addView(sub, subLp);
+
+        LinearLayout searchWrap = new LinearLayout(this);
+        searchWrap.setGravity(Gravity.CENTER_VERTICAL);
+        searchWrap.setBackground(u.shape(Ui.SURFACE_HI, 14));
+        ImageView si = u.icon(Ui.SEARCH, Ui.MUTED, 18);
+        LinearLayout.LayoutParams silp = new LinearLayout.LayoutParams(u.dp(18), u.dp(18));
+        silp.leftMargin = u.dp(14);
+        silp.rightMargin = u.dp(10);
+        searchWrap.addView(si, silp);
+        search = new EditText(this);
+        search.setSingleLine(true);
+        search.setBackground(null);
+        search.setGravity(Gravity.CENTER_VERTICAL);
+        search.setHint("搜索应用或包名");
+        search.setHintTextColor(Ui.MUTED);
+        search.setTextColor(Ui.TEXT);
+        search.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        search.setTypeface(Ui.REG);
+        search.setInputType(InputType.TYPE_CLASS_TEXT);
+        search.setImeOptions(EditorInfo.IME_ACTION_SEARCH);
+        search.setPadding(0, 0, u.dp(12), 0);
+        search.addTextChangedListener(new TextWatcher() {
+            @Override
+            public void beforeTextChanged(CharSequence s, int st, int c, int a) {
             }
-        }
-        /* A granted system app has to stay visible even while 系统应用 is hidden, or
-         * the allow list would hold entries the screen claims do not exist. */
-        for (Chain.Entry e : sys)
-            if (checked.contains(e.pkg) && !on.contains(e))
-                on.add(e);
 
-        rows.clear();
-        if (!on.isEmpty()) {
-            rows.add(header("已授权  " + on.size()));
-            rows.addAll(on);
+            @Override
+            public void onTextChanged(CharSequence s, int st, int b, int c) {
+            }
+
+            @Override
+            public void afterTextChanged(Editable s) {
+                rebuild();
+            }
+        });
+        searchWrap.addView(search, new LinearLayout.LayoutParams(0, u.dp(46), 1f));
+        LinearLayout.LayoutParams swlp = new LinearLayout.LayoutParams(-1, u.dp(46));
+        swlp.topMargin = u.dp(16);
+        head.addView(searchWrap, swlp);
+
+        final LinearLayout sys = new LinearLayout(this);
+        sys.setGravity(Gravity.CENTER_VERTICAL);
+        sys.setBackground(u.shape(Ui.SURFACE, 16));
+        sys.setPadding(u.dp(16), u.dp(12), u.dp(14), u.dp(12));
+        LinearLayout sysText = new LinearLayout(this);
+        sysText.setOrientation(LinearLayout.VERTICAL);
+        sysText.addView(u.text("显示系统应用", 14, Ui.TEXT, Ui.MED));
+        sysToggleSub = u.text("预装应用默认隐藏", 12, Ui.MUTED, Ui.REG);
+        LinearLayout.LayoutParams sslp = new LinearLayout.LayoutParams(-1, -2);
+        sslp.topMargin = u.dp(2);
+        sysText.addView(sysToggleSub, sslp);
+        sys.addView(sysText, new LinearLayout.LayoutParams(0, -2, 1f));
+        sysToggle = new Ui.Toggle(this, u);
+        sysToggle.setChecked(showSystem);
+        sysToggle.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                toggleSystem();
+            }
+        });
+        sys.addView(sysToggle, new LinearLayout.LayoutParams(u.dp(52), u.dp(32)));
+        sys.setClickable(true);
+        sys.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                toggleSystem();
+            }
+        });
+        LinearLayout.LayoutParams sysLp = new LinearLayout.LayoutParams(-1, -2);
+        sysLp.topMargin = u.dp(12);
+        head.addView(sys, sysLp);
+
+        listSummary = u.text("正在读取应用列表…", 12, Ui.MUTED, Ui.REG);
+        LinearLayout.LayoutParams sumLp = new LinearLayout.LayoutParams(-1, -2);
+        sumLp.topMargin = u.dp(14);
+        sumLp.leftMargin = u.dp(4);
+        sumLp.bottomMargin = u.dp(2);
+        head.addView(listSummary, sumLp);
+        pageRoot.addView(head, new LinearLayout.LayoutParams(-1, -2));
+
+        FrameLayout listHost = new FrameLayout(this);
+        list = new ListView(this);
+        list.setBackgroundColor(0x00000000);
+        list.setCacheColorHint(0x00000000);
+        list.setDivider(new ColorDrawable(0xFF26242C));
+        list.setDividerHeight(1);
+        list.setSelector(new ColorDrawable(0x00000000));
+        list.setVerticalScrollBarEnabled(false);
+        list.setOverScrollMode(View.OVER_SCROLL_NEVER);
+        list.setFadingEdgeLength(0);
+        list.setPadding(u.dp(20), u.dp(8), u.dp(20), u.dp(16));
+        list.setClipToPadding(false);
+        adapter = new BaseAdapter() {
+            @Override
+            public int getCount() {
+                return rows.size();
+            }
+
+            @Override
+            public Object getItem(int pos) {
+                return rows.get(pos);
+            }
+
+            @Override
+            public long getItemId(int pos) {
+                return pos;
+            }
+
+            @Override
+            public View getView(int pos, View cv, ViewGroup parent) {
+                return appRow(pos, cv, rows.get(pos));
+            }
+        };
+        list.setAdapter(adapter);
+        emptyView = u.text("正在读取应用列表…", 13, Ui.MUTED, Ui.REG);
+        emptyView.setGravity(Gravity.CENTER);
+        emptyView.setPadding(u.dp(20), u.dp(20), u.dp(20), u.dp(20));
+        listHost.addView(list, new FrameLayout.LayoutParams(-1, -1));
+        listHost.addView(emptyView, new FrameLayout.LayoutParams(-1, -1));
+        list.setEmptyView(emptyView);
+        pageRoot.addView(listHost, new LinearLayout.LayoutParams(-1, 0, 1f));
+        return pageRoot;
+    }
+
+    private static final class RowHolder {
+        ImageView icon;
+        TextView name, detail;
+        Ui.Toggle toggle;
+    }
+
+    private View appRow(int pos, View cv, final Chain.Entry e) {
+        LinearLayout row;
+        RowHolder h;
+        if (cv instanceof LinearLayout && ((LinearLayout) cv).getTag() instanceof RowHolder) {
+            row = (LinearLayout) cv;
+            h = (RowHolder) row.getTag();
+        } else {
+            row = new LinearLayout(this);
+            row.setOrientation(LinearLayout.HORIZONTAL);
+            row.setGravity(Gravity.CENTER_VERTICAL);
+            row.setMinimumHeight(u.dp(68));
+            row.setPadding(u.dp(16), u.dp(10), u.dp(14), u.dp(10));
+            h = new RowHolder();
+            h.icon = new ImageView(this);
+            h.icon.setScaleType(ImageView.ScaleType.FIT_CENTER);
+            LinearLayout.LayoutParams iconLp = new LinearLayout.LayoutParams(u.dp(40), u.dp(40));
+            iconLp.rightMargin = u.dp(14);
+            row.addView(h.icon, iconLp);
+
+            LinearLayout col = new LinearLayout(this);
+            col.setOrientation(LinearLayout.VERTICAL);
+            col.setLayoutParams(new LinearLayout.LayoutParams(0, -2, 1f));
+            h.name = u.text("", 15, Ui.TEXT, Ui.MED);
+            h.name.setSingleLine(true);
+            h.name.setEllipsize(TextUtils.TruncateAt.END);
+            col.addView(h.name, new LinearLayout.LayoutParams(-1, -2));
+            h.detail = u.text("", 12, Ui.MUTED, Ui.REG);
+            h.detail.setSingleLine(true);
+            h.detail.setEllipsize(TextUtils.TruncateAt.END);
+            LinearLayout.LayoutParams detLp = new LinearLayout.LayoutParams(-1, -2);
+            detLp.topMargin = u.dp(3);
+            col.addView(h.detail, detLp);
+            row.addView(col);
+
+            h.toggle = new Ui.Toggle(this, u);
+            h.toggle.setClickable(false);
+            h.toggle.setFocusable(false);
+            LinearLayout.LayoutParams toggleLp = new LinearLayout.LayoutParams(u.dp(52), u.dp(32));
+            toggleLp.leftMargin = u.dp(8);
+            row.addView(h.toggle, toggleLp);
+            row.setTag(h);
         }
-        if (!other.isEmpty()) {
-            rows.add(header("可授权的应用  " + other.size()));
-            rows.addAll(other);
+
+        boolean first = pos == 0;
+        boolean last = pos == rows.size() - 1;
+        row.setBackground(u.press(u.groupBg(first ? 20 : 0, last ? 20 : 0)));
+
+        boolean on = checked.contains(e.pkg);
+        h.name.setText(e.uid == android.os.Process.myUid() ? e.label + "（本应用）" : e.label);
+        h.detail.setText((e.system ? "系统 · " : "") + "uid " + e.uid + " · " + e.pkg);
+        try {
+            h.icon.setImageDrawable(getPackageManager().getApplicationIcon(e.pkg));
+        } catch (Throwable t) {
+            h.icon.setImageDrawable(u.shape(Ui.SURFACE_HI, 12));
         }
-        if (!sys.isEmpty()) {
-            rows.add(header("系统应用  " + sys.size()));
-            rows.addAll(sys);
-        }
-        countLine.setText("已授权 " + on.size() + " 项 · 列表 " + (on.size() + other.size() + sys.size())
-                + " 项 · 已隐藏 " + hidden + " 个系统应用");
-        adapter.notifyDataSetChanged();
+        h.toggle.setChecked(on);
+        row.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                toggle(e);
+            }
+        });
+        return row;
+    }
+
+    private void toggleSystem() {
+        showSystem = !showSystem;
+        if (sysToggle != null)
+            sysToggle.setChecked(showSystem);
+        rebuild();
     }
 
     private void toggle(final Chain.Entry e) {
@@ -372,8 +579,6 @@ public final class Main extends Activity {
         new Thread(new Runnable() {
             @Override
             public void run() {
-                /* KernelSU has no save button: flipping a row *is* the decision, so the
-                 * list goes to disk here rather than sitting staged on screen. */
                 final boolean ok = Chain.saveSelection(Main.this, all, new ArrayList<String>(checked));
                 final String now = Chain.root("id");
                 ui.post(new Runnable() {
@@ -382,8 +587,533 @@ public final class Main extends Activity {
                         logger.line((on ? "已授权 " : "已撤销 ") + e.pkg + "  uid=" + e.uid
                                 + "  saved=" + ok + "  文件=" + Chain.grantsFile(Main.this).getAbsolutePath());
                         logger.line("守护进程现在对我说的身份: " + now);
-                        if (ok)
-                            status();
+                        if (!ok)
+                            toast("保存授权名单失败，详见运行日志");
+                        updateHomeStats();
+                    }
+                });
+            }
+        }).start();
+    }
+
+    private void rebuild() {
+        if (adapter == null)
+            return;
+        String q = search == null ? "" : search.getText().toString().trim().toLowerCase(Locale.US);
+        List<Chain.Entry> filtered = new ArrayList<Chain.Entry>();
+        for (Chain.Entry e : all) {
+            boolean granted = checked.contains(e.pkg);
+            if (e.system && !granted && !showSystem && q.length() == 0)
+                continue;
+            if (q.length() > 0) {
+                String label = e.label == null ? "" : e.label.toLowerCase(Locale.US);
+                if (!label.contains(q) && !e.pkg.toLowerCase(Locale.US).contains(q))
+                    continue;
+            }
+            filtered.add(e);
+        }
+        Collections.sort(filtered, new Comparator<Chain.Entry>() {
+            @Override
+            public int compare(Chain.Entry a, Chain.Entry b) {
+                return a.label.compareToIgnoreCase(b.label);
+            }
+        });
+        rows.clear();
+        rows.addAll(filtered);
+        adapter.notifyDataSetChanged();
+
+        int sysTotal = 0;
+        for (Chain.Entry e : all)
+            if (e.system)
+                sysTotal++;
+        if (sysToggleSub != null)
+            sysToggleSub.setText("预装应用共 " + sysTotal + " 个 · " + (showSystem ? "当前显示" : "当前隐藏"));
+        if (listSummary != null) {
+            if (!appsLoaded)
+                listSummary.setText("正在读取应用列表…");
+            else
+                listSummary.setText("已授权 " + checked.size() + " 个应用 · 列表 " + filtered.size() + " 项"
+                        + (q.length() > 0 ? " · 搜索「" + search.getText().toString().trim() + "」" : ""));
+        }
+        if (emptyView != null)
+            emptyView.setText(!appsLoaded ? "正在读取应用列表…"
+                    : q.length() > 0 ? "没有匹配的应用" : "没有可显示的应用");
+        updateHomeStats();
+    }
+
+    /* ------------------------------------------------------------ settings */
+
+    private View buildSettings() {
+        ScrollView sv = new ScrollView(this);
+        sv.setFillViewport(true);
+        sv.setVerticalScrollBarEnabled(false);
+        final LinearLayout col = new LinearLayout(this);
+        col.setOrientation(LinearLayout.VERTICAL);
+        col.setPadding(u.dp(20), u.dp(18), u.dp(20), u.dp(28));
+        sv.addView(col, new ScrollView.LayoutParams(-1, -2));
+
+        col.addView(u.heading("设置", 28, Ui.TEXT));
+        TextView sub = u.text("授权、音频与诊断", 13, Ui.MUTED, Ui.REG);
+        LinearLayout.LayoutParams subLp = new LinearLayout.LayoutParams(-1, -2);
+        subLp.topMargin = u.dp(5);
+        col.addView(sub, subLp);
+
+        addSection(col, "授权与安全");
+        LinearLayout sec1 = newCard();
+        sec1.addView(settingRow(Ui.TRASH, "撤销全部授权", "保留本应用，其它应用立即失效",
+                null, Ui.RED, false, new Runnable() {
+                    @Override
+                    public void run() {
+                        revokeAll();
+                    }
+                }));
+        sec1.addView(divider());
+        sec1.addView(settingRow(Ui.TERMINAL, "测试 su 名字闸", "检查应用侧的 su 路径闸是否打开",
+                null, Ui.TEXT, true, new Runnable() {
+                    @Override
+                    public void run() {
+                        probeSuName();
+                    }
+                }));
+        col.addView(sec1, cardLp());
+
+        addSection(col, "音频");
+        LinearLayout sec2 = newCard();
+        gainRow601 = settingRow(-1, "跟随 6.0.1", "把输出增益切成 6.0.1 那一档",
+                null, Ui.TEXT, false, new Runnable() {
+                    @Override
+                    public void run() {
+                        hpGain("601");
+                    }
+                });
+        gainCheck601 = u.icon(Ui.CHECK, Ui.PRIMARY, 16);
+        gainRow601.addView(gainCheck601, trailingIconLp());
+        sec2.addView(gainRow601);
+        sec2.addView(divider());
+        gainRowStock = settingRow(-1, "跟随本机", "写回 Xplay6 自己的 DT 值",
+                null, Ui.TEXT, false, new Runnable() {
+                    @Override
+                    public void run() {
+                        hpGain("stock");
+                    }
+                });
+        gainCheckStock = u.icon(Ui.CHECK, Ui.PRIMARY, 16);
+        gainRowStock.addView(gainCheckStock, trailingIconLp());
+        sec2.addView(gainRowStock);
+        col.addView(sec2, cardLp());
+        gainNote = u.text("耳机增益：未改（7 自己的 DT 值）", 12, Ui.MUTED, Ui.REG);
+        gainNote.setLineSpacing(u.dp(2), 1f);
+        LinearLayout.LayoutParams gnLp = new LinearLayout.LayoutParams(-1, -2);
+        gnLp.leftMargin = u.dp(4);
+        gnLp.topMargin = u.dp(8);
+        col.addView(gainNote, gnLp);
+
+        addSection(col, "诊断");
+        LinearLayout sec3 = newCard();
+        sec3.addView(settingRow(Ui.LOG, "运行日志", "提权链与守护进程的每一步",
+                null, Ui.TEXT, true, new Runnable() {
+                    @Override
+                    public void run() {
+                        openLog();
+                    }
+                }));
+        sec3.addView(divider());
+        sec3.addView(settingRow(Ui.SHIELD, "授权日志", "守护进程记录的 su 请求",
+                null, Ui.TEXT, true, new Runnable() {
+                    @Override
+                    public void run() {
+                        dumpSuLog();
+                    }
+                }));
+        col.addView(sec3, cardLp());
+
+        addSection(col, "关于");
+        LinearLayout sec4 = newCard();
+        sec4.addView(settingRow(Ui.INFO, "版本", null, "v" + versionName(), Ui.TEXT, false, null));
+        sec4.addView(divider());
+        sec4.addView(settingRow(-1, "运行方式", null, "内存态", Ui.TEXT, false, null));
+        sec4.addView(divider());
+        sec4.addView(settingRow(-1, "适用设备", null, "Xplay6 / PD1610", Ui.TEXT, false, null));
+        col.addView(sec4, cardLp());
+
+        TextView footer = u.text("提权只改写运行内存与 SELinux 运行表，不刷机、不写任何分区、不解 BL。\n重启后所有改动自动消失，需要重新提权。",
+                12, Ui.MUTED, Ui.REG);
+        footer.setLineSpacing(u.dp(3), 1f);
+        LinearLayout.LayoutParams ftLp = new LinearLayout.LayoutParams(-1, -2);
+        ftLp.leftMargin = u.dp(4);
+        ftLp.topMargin = u.dp(18);
+        col.addView(footer, ftLp);
+        return sv;
+    }
+
+    private void addSection(LinearLayout col, String name) {
+        TextView t = u.section(name);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
+        lp.leftMargin = u.dp(4);
+        lp.topMargin = u.dp(col.getChildCount() == 0 ? 20 : 22);
+        lp.bottomMargin = u.dp(8);
+        col.addView(t, lp);
+    }
+
+    private LinearLayout newCard() {
+        LinearLayout c = new LinearLayout(this);
+        c.setOrientation(LinearLayout.VERTICAL);
+        c.setBackground(u.shape(Ui.SURFACE, 20));
+        c.setClipToOutline(true);
+        return c;
+    }
+
+    private LinearLayout.LayoutParams cardLp() {
+        return new LinearLayout.LayoutParams(-1, -2);
+    }
+
+    private View divider() {
+        View v = new View(this);
+        v.setBackgroundColor(0xFF26242C);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, u.dp(1));
+        lp.leftMargin = u.dp(16);
+        lp.rightMargin = u.dp(16);
+        v.setLayoutParams(lp);
+        return v;
+    }
+
+    private LinearLayout.LayoutParams trailingIconLp() {
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(u.dp(16), u.dp(16));
+        lp.leftMargin = u.dp(10);
+        return lp;
+    }
+
+    private LinearLayout settingRow(int glyph, String title, String sub, String value,
+                                    int titleColor, boolean chevron, Runnable body) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setMinimumHeight(u.dp(64));
+        row.setPadding(u.dp(16), u.dp(12), u.dp(16), u.dp(12));
+        if (glyph >= 0) {
+            ImageView icon = u.icon(glyph, titleColor == Ui.RED ? Ui.RED : Ui.PRIMARY, 20);
+            LinearLayout.LayoutParams ilp = new LinearLayout.LayoutParams(u.dp(20), u.dp(20));
+            ilp.rightMargin = u.dp(14);
+            row.addView(icon, ilp);
+        }
+        LinearLayout texts = new LinearLayout(this);
+        texts.setOrientation(LinearLayout.VERTICAL);
+        texts.addView(u.text(title, 15, titleColor, Ui.MED));
+        if (sub != null) {
+            TextView s = u.text(sub, 12, Ui.MUTED, Ui.REG);
+            LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(-1, -2);
+            slp.topMargin = u.dp(2);
+            texts.addView(s, slp);
+        }
+        row.addView(texts, new LinearLayout.LayoutParams(0, -2, 1f));
+        if (value != null) {
+            TextView v = u.text(value, 13, Ui.MUTED, Ui.REG);
+            LinearLayout.LayoutParams vlp = new LinearLayout.LayoutParams(-2, -2);
+            vlp.leftMargin = u.dp(8);
+            row.addView(v, vlp);
+        }
+        if (chevron) {
+            ImageView c = u.icon(Ui.CHEVRON, Ui.MUTED, 16);
+            LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(u.dp(16), u.dp(16));
+            clp.leftMargin = u.dp(8);
+            row.addView(c, clp);
+        }
+        if (body != null) {
+            row.setBackground(u.press(u.shape(0x00000000, 0)));
+            row.setClickable(true);
+            row.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    body.run();
+                }
+            });
+        }
+        return row;
+    }
+
+    private void updateGainSettings() {
+        if (gainCheck601 == null)
+            return;
+        String arm = Chain.gainChoice(this);
+        boolean a = "601".equals(arm);
+        boolean b = "stock".equals(arm);
+        gainCheck601.setVisibility(a ? View.VISIBLE : View.INVISIBLE);
+        gainCheckStock.setVisibility(b ? View.VISIBLE : View.INVISIBLE);
+        gainRow601.setBackground(u.press(u.shape(a ? 0x1FD3BCFD : 0x00000000, 0)));
+        gainRowStock.setBackground(u.press(u.shape(b ? 0x1FD3BCFD : 0x00000000, 0)));
+        gainNote.setText(a ? "耳机增益：请求 6.0.1 那档（RAM 读不回是设计如此），重启后由开机链再写"
+                : b ? "耳机增益：请求本机 DT 那档"
+                : "耳机增益：未改（7 自己的 DT 值）");
+    }
+
+    private void hpGain(final String arm) {
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                String out = Chain.hpGain(arm);
+                if (Chain.hpGainLanded(out)) {
+                    final boolean kept = Chain.saveGainChoice(Main.this, arm);
+                    logger.line("耳机增益 " + arm + "：已写入（RAM 读不回是设计如此）·"
+                            + (kept ? "重启后开机链会再写一次" : "选择没能存下（saved=false），重启后不会自动回来")
+                            + "·要暂停→播放或切一首才吃到");
+                    ui.post(new Runnable() {
+                        @Override
+                        public void run() {
+                            updateGainSettings();
+                            toast(kept ? "耳机增益已写入，切换播放后生效" : "增益写入了，但选择没存下");
+                        }
+                    });
+                } else {
+                    logger.line("耳机增益 " + arm + "：没打到 -> " + (out == null ? "null" : out));
+                    toast("耳机增益没打到，详见运行日志");
+                }
+            }
+        }).start();
+    }
+
+    private void revokeAll() {
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                checked.clear();
+                ArrayList<Integer> only = new ArrayList<Integer>();
+                only.add(Integer.valueOf(android.os.Process.myUid()));
+                final boolean ok = Chain.writeGrants(Main.this, only);
+                logger.line("已撤销除管理端以外的全部授权 saved=" + ok);
+                ui.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        refresh();
+                        toast(ok ? "已撤销全部授权" : "撤销失败，详见运行日志");
+                    }
+                });
+            }
+        }).start();
+    }
+
+    private void probeSuName() {
+        openLog();
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                Chain.suNameProbe(Main.this, logger);
+            }
+        }).start();
+    }
+
+    private void dumpSuLog() {
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                String l = Chain.suLog();
+                logger.line("su log:\n" + l);
+                openLog();
+            }
+        }).start();
+    }
+
+    /* ------------------------------------------------------------ nav/log */
+
+    private View buildNav() {
+        LinearLayout wrap = new LinearLayout(this);
+        wrap.setOrientation(LinearLayout.VERTICAL);
+        View line = new View(this);
+        line.setBackgroundColor(0xFF232128);
+        wrap.addView(line, new LinearLayout.LayoutParams(-1, u.dp(1)));
+
+        LinearLayout bar = new LinearLayout(this);
+        bar.setOrientation(LinearLayout.HORIZONTAL);
+        bar.setPadding(u.dp(8), u.dp(6), u.dp(8), u.dp(6));
+        int[] glyphs = { Ui.HOME, Ui.APPS, Ui.SETTINGS };
+        String[] labels = { "首页", "应用", "设置" };
+        for (int i = 0; i < 3; i++) {
+            final int idx = i;
+            LinearLayout item = new LinearLayout(this);
+            item.setOrientation(LinearLayout.VERTICAL);
+            item.setGravity(Gravity.CENTER);
+            item.setBackground(u.press(u.shape(0x00000000, 16)));
+            item.setClickable(true);
+            item.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    showPage(idx);
+                }
+            });
+            FrameLayout pill = new FrameLayout(this);
+            pill.setBackground(u.shape(0x00000000, 14));
+            ImageView ic = u.icon(glyphs[i], Ui.MUTED, 22);
+            pill.addView(ic);
+            item.addView(pill, new LinearLayout.LayoutParams(u.dp(56), u.dp(28)));
+            TextView label = u.text(labels[i], 11, Ui.MUTED, Ui.REG);
+            LinearLayout.LayoutParams llp = new LinearLayout.LayoutParams(-2, -2);
+            llp.topMargin = u.dp(2);
+            item.addView(label, llp);
+            navItems[i] = item;
+            navPills[i] = pill;
+            navIcons[i] = ic;
+            navLabels[i] = label;
+            navGlyphs[i] = glyphs[i];
+            bar.addView(item, new LinearLayout.LayoutParams(0, u.dp(52), 1f));
+        }
+        wrap.addView(bar);
+        return wrap;
+    }
+
+    private void styleNav() {
+        for (int i = 0; i < 3; i++) {
+            boolean on = i == page;
+            navPills[i].setBackground(u.shape(on ? 0x26D3BCFD : 0x00000000, 14));
+            navIcons[i].setImageDrawable(u.glyph(navGlyphs[i], on ? Ui.PRIMARY : Ui.MUTED));
+            navLabels[i].setTextColor(on ? Ui.PRIMARY : Ui.MUTED);
+            navLabels[i].setTypeface(on ? Ui.MED : Ui.REG);
+        }
+    }
+
+    private void showPage(int p) {
+        page = p;
+        for (int i = 0; i < pages.length; i++)
+            pages[i].setVisibility(i == p ? View.VISIBLE : View.GONE);
+        styleNav();
+        if (p == PAGE_APPS && !appsLoaded && !loading)
+            refresh();
+        if (p == PAGE_HOME)
+            status();
+        if (p == PAGE_SETTINGS)
+            updateGainSettings();
+    }
+
+    private View buildLogOverlay() {
+        logOverlay = new FrameLayout(this);
+        logOverlay.setBackgroundColor(Ui.BG);
+        logOverlay.setClickable(true);
+        logOverlay.setVisibility(View.GONE);
+
+        LinearLayout col = new LinearLayout(this);
+        col.setOrientation(LinearLayout.VERTICAL);
+        col.setPadding(u.dp(16), u.dp(12), u.dp(16), u.dp(16));
+
+        LinearLayout head = new LinearLayout(this);
+        head.setGravity(Gravity.CENTER_VERTICAL);
+        FrameLayout back = new FrameLayout(this);
+        back.setBackground(u.press(u.shape(0x00000000, 22)));
+        back.addView(u.icon(Ui.BACK, Ui.TEXT, 22));
+        back.setClickable(true);
+        back.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                closeLog();
+            }
+        });
+        head.addView(back, new LinearLayout.LayoutParams(u.dp(44), u.dp(44)));
+        LinearLayout titles = new LinearLayout(this);
+        titles.setOrientation(LinearLayout.VERTICAL);
+        titles.addView(u.heading("运行日志", 18, Ui.TEXT));
+        titles.addView(u.text("本次开机内的提权过程", 11, Ui.MUTED, Ui.REG));
+        LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(0, -2, 1f);
+        tlp.leftMargin = u.dp(6);
+        head.addView(titles, tlp);
+        col.addView(head, new LinearLayout.LayoutParams(-1, -2));
+
+        FrameLayout logCard = new FrameLayout(this);
+        logCard.setBackground(u.shape(Ui.SURFACE, 18));
+        logScroll = new ScrollView(this);
+        logScroll.setFillViewport(true);
+        logScroll.setPadding(u.dp(14), u.dp(12), u.dp(14), u.dp(12));
+        logScroll.setClipToPadding(false);
+        logBody = u.text("", 11, Ui.MUTED, Ui.MONO);
+        logBody.setTextIsSelectable(true);
+        logBody.setLineSpacing(u.dp(2), 1f);
+        logScroll.addView(logBody, new ScrollView.LayoutParams(-1, -2));
+        logCard.addView(logScroll, new FrameLayout.LayoutParams(-1, -1));
+        LinearLayout.LayoutParams lclp = new LinearLayout.LayoutParams(-1, 0, 1f);
+        lclp.topMargin = u.dp(14);
+        col.addView(logCard, lclp);
+
+        logOverlay.addView(col, new FrameLayout.LayoutParams(-1, -1));
+        return logOverlay;
+    }
+
+    private void appendLog(String s) {
+        if (logBody == null)
+            return;
+        logBody.append(s + "\n");
+        if (logOpen)
+            scrollLog();
+    }
+
+    private void scrollLog() {
+        logScroll.post(new Runnable() {
+            @Override
+            public void run() {
+                logScroll.fullScroll(ScrollView.FOCUS_DOWN);
+            }
+        });
+    }
+
+    private void openLog() {
+        ui.post(new Runnable() {
+            @Override
+            public void run() {
+                if (logOpen)
+                    return;
+                logOpen = true;
+                logOverlay.setVisibility(View.VISIBLE);
+                logOverlay.setAlpha(0f);
+                logOverlay.animate().alpha(1f).setDuration(150).start();
+                scrollLog();
+            }
+        });
+    }
+
+    private void closeLog() {
+        if (!logOpen)
+            return;
+        logOpen = false;
+        logOverlay.animate().alpha(0f).setDuration(120)
+                .withEndAction(new Runnable() {
+                    @Override
+                    public void run() {
+                        logOverlay.setVisibility(View.GONE);
+                        logOverlay.setAlpha(1f);
+                    }
+                }).start();
+    }
+
+    @Override
+    public void onBackPressed() {
+        if (logOpen) {
+            closeLog();
+            return;
+        }
+        if (page != PAGE_HOME) {
+            showPage(PAGE_HOME);
+            return;
+        }
+        super.onBackPressed();
+    }
+
+    /* ----------------------------------------------------------- state */
+
+    private void refresh() {
+        if (loading)
+            return;
+        loading = true;
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                final List<Chain.Entry> got = Chain.listApps(Main.this);
+                ui.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        loading = false;
+                        appsLoaded = true;
+                        all.clear();
+                        all.addAll(got);
+                        checked.clear();
+                        for (Chain.Entry e : all)
+                            if (e.granted)
+                                checked.add(e.pkg);
+                        rebuild();
                     }
                 });
             }
@@ -408,227 +1138,137 @@ public final class Main extends Activity {
     private void applyStatus(String got) {
         String s = got == null ? "" : got.trim();
         boolean rooted = s.startsWith("0") || s.contains("uid=0");
-        StringBuilder b = new StringBuilder();
-        b.append(rooted ? "root 可用" : "尚未提权 · 点「提权」跑一次链子");
-        if (s.contains("Enforcing"))
-            b.append(" · Enforcing（按域）");
-        else if (s.contains("Permissive"))
-            b.append(" · Permissive（兜底）");
+        boolean enforcing = s.contains("Enforcing");
+        boolean permissive = s.contains("Permissive");
         boolean onPath = false;
         for (String line : s.split("[\\r\\n ]+"))
             if (line.endsWith("/su"))
                 onPath = true;
-        b.append(" · su ").append(onPath ? "在 PATH" : "不在 PATH");
-        statusLine.setText(b);
+
+        int color = rooted ? Ui.GREEN : Ui.AMBER;
+        heroTitle.setText(rooted ? "Root 已就绪" : "尚未提权");
+        heroTitle.setTextColor(color);
+        heroBadge.setBackground(u.shape(rooted ? 0x267ADF9A : 0x26F2CC7B, 24));
+        heroIcon.setImageDrawable(u.glyph(Ui.SHIELD, color));
+
+        String se = enforcing ? "Enforcing" : permissive ? "Permissive" : "未知";
+        String seLong = enforcing ? "Enforcing" : permissive ? "Permissive（兜底）" : "状态未知";
+        String channel = rooted && Chain.lastChannel != null && !"-".equals(Chain.lastChannel)
+                ? "\n通道 " + Chain.lastChannel : "";
+        heroDetail.setText("SELinux " + seLong + " · su " + (onPath ? "在 PATH" : "不在 PATH") + channel);
+        statSe.setText(se);
+        statSu.setText(onPath ? "在 PATH" : "不在 PATH");
     }
 
-    private static boolean isHeader(Chain.Entry e) {
-        return e.pkg == null;
+    private void updateHomeStats() {
+        if (statGrants == null)
+            return;
+        statGrants.setText(appsLoaded ? String.valueOf(checked.size()) : "—");
+        updateHomeGranted();
     }
 
-    private static Chain.Entry header(String label) {
-        Chain.Entry e = new Chain.Entry(null, label, 0, false);
-        e.granted = false;
-        return e;
-    }
-
-    private View headerRow(View cv, Chain.Entry e) {
-        TextView t = (cv instanceof TextView) ? (TextView) cv : new TextView(this);
-        t.setText(e.label.toUpperCase());
-        t.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
-        t.setTextColor(C_PRIMARY);
-        t.setTypeface(TF);
-        t.setLetterSpacing(0.06f);
-        t.setPadding(dp(14), dp(14), dp(14), dp(6));
-        return t;
-    }
-
-    private static final class Holder {
-        ImageView icon;
-        TextView name, detail;
-        FrameLayout pill;
-        GradientDrawable pillBg;
-        View thumb;
-        GradientDrawable thumbBg;
-    }
-
-    private View appRow(View cv, final Chain.Entry e) {
-        LinearLayout row;
-        final Holder h;
-        if (cv instanceof LinearLayout && ((LinearLayout) cv).getTag() instanceof Holder) {
-            row = (LinearLayout) cv;
-            h = (Holder) row.getTag();
-        } else {
-            row = new LinearLayout(this);
-            row.setOrientation(LinearLayout.HORIZONTAL);
+    private void updateHomeGranted() {
+        if (homeGrantedList == null)
+            return;
+        homeGrantedList.removeAllViews();
+        if (!appsLoaded) {
+            if (homeGrantedCount != null)
+                homeGrantedCount.setText("");
+            homeGrantedList.addView(u.text("正在读取…", 12, Ui.MUTED, Ui.REG));
+            return;
+        }
+        List<Chain.Entry> granted = new ArrayList<Chain.Entry>();
+        for (Chain.Entry e : all)
+            if (checked.contains(e.pkg))
+                granted.add(e);
+        if (homeGrantedCount != null)
+            homeGrantedCount.setText(granted.isEmpty() ? "" : granted.size() + " 个");
+        if (granted.isEmpty()) {
+            homeGrantedList.addView(u.text("暂无已授权的应用", 12, Ui.MUTED, Ui.REG));
+            return;
+        }
+        int limit = Math.min(granted.size(), 4);
+        for (int i = 0; i < limit; i++) {
+            final Chain.Entry e = granted.get(i);
+            LinearLayout row = new LinearLayout(this);
             row.setGravity(Gravity.CENTER_VERTICAL);
-            row.setBackgroundResource(selectableItemBackground());
-            h = new Holder();
-
-            h.icon = new ImageView(this);
-            h.icon.setScaleType(ImageView.ScaleType.FIT_CENTER);
-            LinearLayout.LayoutParams iconLp = new LinearLayout.LayoutParams(dp(40), dp(40));
-            iconLp.rightMargin = dp(14);
-            row.addView(h.icon, iconLp);
-
-            LinearLayout col = new LinearLayout(this);
-            col.setOrientation(LinearLayout.VERTICAL);
-            col.setLayoutParams(new LinearLayout.LayoutParams(0, -2, 1f));
-
-            h.name = text("", 15, C_TEXT, TF);
-            h.name.setSingleLine(true);
-            h.name.setEllipsize(android.text.TextUtils.TruncateAt.END);
-            col.addView(h.name, new LinearLayout.LayoutParams(-1, -2));
-
-            h.detail = text("", 12, C_MUTED, TF);
-            h.detail.setSingleLine(true);
-            h.detail.setEllipsize(android.text.TextUtils.TruncateAt.END);
-            LinearLayout.LayoutParams detLp = new LinearLayout.LayoutParams(-1, -2);
-            detLp.topMargin = dp(3);
-            col.addView(h.detail, detLp);
-            row.addView(col);
-
-            h.pill = new FrameLayout(this);
-            h.pillBg = round(16);
-            h.pill.setBackground(h.pillBg);
-            h.pill.setClickable(false);
-            row.addView(h.pill, new LinearLayout.LayoutParams(dp(52), dp(32)));
-
-            h.thumb = new View(this);
-            h.thumbBg = new GradientDrawable();
-            h.thumbBg.setShape(GradientDrawable.OVAL);
-            h.thumb.setBackground(h.thumbBg);
-            row.setTag(h);
-        }
-
-        boolean on = checked.contains(e.pkg);
-        h.name.setText(e.uid == android.os.Process.myUid() ? e.label + "（本应用）" : e.label);
-        h.detail.setText("uid " + e.uid + "   ·   " + e.pkg);
-        try {
-            h.icon.setImageDrawable(getPackageManager().getApplicationIcon(e.pkg));
-        } catch (Throwable t) {
-            h.icon.setImageDrawable(round(C_CARD_HI, 12));
-        }
-
-        h.pillBg.setColor(on ? C_PRIMARY : Color.TRANSPARENT);
-        h.pillBg.setStroke(dp(2), on ? C_PRIMARY : C_OUTLINE);
-        h.thumbBg.setColor(on ? C_ON_PRIMARY : C_MUTED);
-        h.thumb.setAlpha(on ? 1f : 0.75f);
-        FrameLayout.LayoutParams thumbLp = new FrameLayout.LayoutParams(dp(on ? 24 : 20), dp(on ? 24 : 20));
-        thumbLp.gravity = Gravity.CENTER_VERTICAL | (on ? Gravity.END : Gravity.START);
-        thumbLp.rightMargin = dp(on ? 4 : 6);
-        thumbLp.leftMargin = dp(on ? 0 : 6);
-        h.thumb.setLayoutParams(thumbLp);
-        if (h.thumb.getParent() == null)
-            h.pill.addView(h.thumb);
-
-        row.setMinimumHeight(dp(64));
-        row.setPadding(dp(14), dp(10), dp(14), dp(10));
-        row.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                toggle(e);
+            row.setPadding(u.dp(2), u.dp(6), u.dp(2), u.dp(6));
+            row.setBackground(u.press(u.shape(0x00000000, 0)));
+            ImageView icon = new ImageView(this);
+            icon.setScaleType(ImageView.ScaleType.FIT_CENTER);
+            LinearLayout.LayoutParams ilp = new LinearLayout.LayoutParams(u.dp(28), u.dp(28));
+            ilp.rightMargin = u.dp(10);
+            row.addView(icon, ilp);
+            try {
+                icon.setImageDrawable(getPackageManager().getApplicationIcon(e.pkg));
+            } catch (Throwable t) {
+                icon.setImageDrawable(u.shape(Ui.SURFACE_HI, 8));
             }
-        });
-        return row;
-    }
-
-    private void styleSystemChip() {
-        systemChip.setText(showSystem ? "系统应用：显示中" : "系统应用：隐藏");
-        systemChip.setBackground(chipDrawable(showSystem));
-    }
-
-    private void setLogOpen(boolean open) {
-        logOpen = open;
-        logScroll.setVisibility(open ? View.VISIBLE : View.GONE);
-        logHead.setText(open ? "运行日志      点按收起" : "运行日志      点按展开");
-        if (open)
-            logScroll.post(new Runnable() {
+            TextView name = u.text(e.label, 14, Ui.TEXT, Ui.REG);
+            name.setSingleLine(true);
+            name.setEllipsize(TextUtils.TruncateAt.END);
+            row.addView(name, new LinearLayout.LayoutParams(0, -2, 1f));
+            row.addView(u.text("uid " + e.uid, 11, Ui.MUTED, Ui.REG));
+            row.setClickable(true);
+            row.setOnClickListener(new View.OnClickListener() {
                 @Override
-                public void run() {
-                    logScroll.fullScroll(ScrollView.FOCUS_DOWN);
+                public void onClick(View v) {
+                    showPage(PAGE_APPS);
                 }
             });
+            homeGrantedList.addView(row, new LinearLayout.LayoutParams(-1, -2));
+        }
+        if (granted.size() > limit) {
+            TextView more = u.text("还有 " + (granted.size() - limit) + " 个，在「应用」页查看",
+                    12, Ui.MUTED, Ui.REG);
+            LinearLayout.LayoutParams mlp = new LinearLayout.LayoutParams(-1, -2);
+            mlp.topMargin = u.dp(2);
+            homeGrantedList.addView(more, mlp);
+        }
     }
 
-    /* The chip bodies run on a worker, so opening the log has to be posted. */
-    private void openLog() {
-        ui.post(new Runnable() {
+    private void escalate() {
+        if (escalating)
+            return;
+        escalating = true;
+        escalateLabel.setText("正在提权…");
+        escalateBtn.setAlpha(0.6f);
+        escalateBtn.setEnabled(false);
+        refreshBtn.setEnabled(false);
+        escalateProgress.setVisibility(View.VISIBLE);
+        logger.line("--- 开始提权 ---");
+        new Thread(new Runnable() {
             @Override
             public void run() {
-                setLogOpen(true);
+                try {
+                    Chain.run(Main.this, logger, 24);
+                } catch (Throwable t) {
+                    logger.line("提权链抛错: " + t);
+                }
+                ui.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        escalating = false;
+                        escalateLabel.setText("提权");
+                        escalateBtn.setAlpha(1f);
+                        escalateBtn.setEnabled(true);
+                        refreshBtn.setEnabled(true);
+                        escalateProgress.setVisibility(View.GONE);
+                        status();
+                        refresh();
+                        toast("提权流程结束，状态已刷新");
+                    }
+                });
             }
-        });
+        }).start();
     }
 
-    private TextView chip(String label, Runnable body) {
-        TextView t = text(label, 12, C_PRIMARY, TF);
-        t.setGravity(Gravity.CENTER);
-        t.setMinWidth(dp(64));
-        int px = dp(14);
-        t.setPadding(px, 0, px, 0);
-        t.setBackground(chipDrawable(false));
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, dp(32));
-        lp.rightMargin = dp(8);
-        t.setLayoutParams(lp);
-        if (body != null)
-            t.setOnClickListener(new ThreadClick(body));
-        return t;
-    }
-
-    /* Chip bodies touch the daemon and the kernel chain, which blocks for tens of
-     * seconds -- a tap must never freeze the list. */
-    private final class ThreadClick implements View.OnClickListener {
-        private final Runnable body;
-
-        ThreadClick(Runnable body) {
-            this.body = body;
+    private String versionName() {
+        try {
+            return getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
+        } catch (Throwable t) {
+            return "未知版本";
         }
-
-        @Override
-        public void onClick(View v) {
-            new Thread(body).start();
-        }
-    }
-
-    private GradientDrawable chipDrawable(boolean selected) {
-        GradientDrawable g = round(16);
-        g.setColor(selected ? 0x2AD0BCFF : 0x00000000);
-        g.setStroke(dp(1), selected ? C_PRIMARY : 0x40D0BCFF);
-        return g;
-    }
-
-    private static GradientDrawable round(int radiusDp) {
-        GradientDrawable g = new GradientDrawable();
-        g.setCornerRadius(radiusDp);
-        return g;
-    }
-
-    private GradientDrawable round(int color, int radiusDp) {
-        GradientDrawable g = round(radiusDp);
-        g.setColor(color);
-        return g;
-    }
-
-    private int selectableItemBackground() {
-        TypedValue v = new TypedValue();
-        if (getTheme().resolveAttribute(android.R.attr.selectableItemBackground, v, true))
-            return v.resourceId;
-        return android.R.color.transparent;
-    }
-
-    private TextView text(String s, float sp, int color, Typeface tf) {
-        TextView t = new TextView(this);
-        t.setText(s);
-        t.setTextSize(TypedValue.COMPLEX_UNIT_SP, sp);
-        t.setTextColor(color);
-        t.setTypeface(tf);
-        return t;
-    }
-
-    private int dp(float v) {
-        return (int) TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, v,
-                getResources().getDisplayMetrics());
     }
 
     private void toast(final String s) {

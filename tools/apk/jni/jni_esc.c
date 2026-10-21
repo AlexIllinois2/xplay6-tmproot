@@ -18,6 +18,11 @@ extern int esc_state(char *out, int cap);
 extern int esc_escalate_ex(const char *daemon, int rounds, char *out, int cap, int map_only);
 extern int esc_sugate(char *out, int cap);
 extern int esc_sugate_revert(char *out, int cap);
+extern int esc_sugate7_open(char *out, int cap);
+extern int esc_sugate7_restore(const char *orig, char *out, int cap);
+extern int esc_sugate7_patch(char *out, int cap);
+extern int esc_sugate7_abort(const char *orig, char *out, int cap);
+extern int esc_sugate7_revert(char *out, int cap);
 
 /* ---- reverse-direction su client -------------------------------------
  * Java cannot read SCM_CREDENTIALS, so the app's identity has to be carried by
@@ -25,7 +30,7 @@ extern int esc_sugate_revert(char *out, int cap);
  * let it connect back: the uid it then reads is the kernel's, not ours.
  * Same protocol as tools/suc.c -- kept deliberately small and identical.
  */
-#define REQ_DIR "/data/local/tmp/.sud"
+#define REQ_DIR "/data/local/tmp/.sud/req"
 
 static int peer_round_trip(const char *req, char *out, int cap)
 {
@@ -240,4 +245,70 @@ Java_com_xplay6_temproot_Esc_nativeSugateRevert(JNIEnv *env, jobject thiz)
     (void)thiz;
     buf[0] = 0;
     return report(env, esc_sugate_revert(buf, sizeof buf), buf);
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_xplay6_temproot_Esc_nativeSugate7Open(JNIEnv *env, jobject thiz)
+{
+    char buf[2048];
+
+    (void)thiz;
+    buf[0] = 0;
+    return report(env, esc_sugate7_open(buf, sizeof buf), buf);
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_xplay6_temproot_Esc_nativeSugate7Restore(JNIEnv *env, jobject thiz, jstring orig)
+{
+    char buf[2048];
+    const char *o;
+
+    (void)thiz;
+    buf[0] = 0;
+    o = (*env)->GetStringUTFChars(env, orig, NULL);
+    if (o == NULL)
+        return report(env, -1, "sugate7-restore: no original path given");
+    {
+        int rc = esc_sugate7_restore(o, buf, sizeof buf);
+        (*env)->ReleaseStringUTFChars(env, orig, o);
+        return report(env, rc, buf);
+    }
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_xplay6_temproot_Esc_nativeSugate7Patch(JNIEnv *env, jobject thiz)
+{
+    char buf[2048];
+
+    (void)thiz;
+    buf[0] = 0;
+    return report(env, esc_sugate7_patch(buf, sizeof buf), buf);
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_xplay6_temproot_Esc_nativeSugate7Abort(JNIEnv *env, jobject thiz, jstring orig)
+{
+    char buf[2048];
+    const char *o;
+
+    (void)thiz;
+    buf[0] = 0;
+    o = (*env)->GetStringUTFChars(env, orig, NULL);
+    if (o == NULL)
+        return report(env, -1, "sugate7-abort: no original path given");
+    {
+        int rc = esc_sugate7_abort(o, buf, sizeof buf);
+        (*env)->ReleaseStringUTFChars(env, orig, o);
+        return report(env, rc, buf);
+    }
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_xplay6_temproot_Esc_nativeSugate7Revert(JNIEnv *env, jobject thiz)
+{
+    char buf[1024];
+
+    (void)thiz;
+    buf[0] = 0;
+    return report(env, esc_sugate7_revert(buf, sizeof buf), buf);
 }

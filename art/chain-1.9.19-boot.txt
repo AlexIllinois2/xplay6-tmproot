@@ -1,0 +1,48 @@
+07-03 13:21:43.245  4709  4709 I TempRoot-boot: received android.intent.action.BOOT_COMPLETED -> starting EscService
+07-03 13:21:43.271  4709  4726 I TempRoot-boot: daemon probe :12346 failed: java.net.ConnectException: Connection refused
+07-03 13:21:43.272  4709  4726 I TempRoot-boot: daemon probe :12345 failed: java.net.ConnectException: Connection refused
+07-03 13:21:43.274  4709  4727 I TempRoot-boot: boot trigger: waiting for the boot storm to settle before the needle
+07-03 13:24:13.278  4709  4727 I TempRoot-boot: state before: rc=0 uid=10151 enforce=Enforcing modprobe=
+07-03 13:24:13.543  4709  4727 I TempRoot-boot: selftest (diagnostic only): rc=0 selftest(WQI=4 SAFEFED=0) rc=1
+07-03 13:24:13.601  4709  4727 I TempRoot-boot: staged /data/user/0/com.xplay6.temproot/files/sud bytes=2204376 canExec=true
+07-03 13:24:13.606  4709  4727 I TempRoot-boot: self-grant uid=10151 resealed saved=true list=[10151, 10133, 10135] why=-
+07-03 13:24:13.608  4709  4727 I TempRoot-boot: token length=32 file=/data/user/0/com.xplay6.temproot/files/su.token
+07-03 13:24:13.609  4709  4727 I TempRoot-boot: kernel 3.18.31-perf-g9dce1fbc9 -> route 7 (self-contained helper, permissive-map exemption)
+07-03 13:24:13.648  4709  4727 I TempRoot-boot: staged /data/user/0/com.xplay6.temproot/files/broot7 bytes=2243096 canExec=true
+07-03 13:24:13.657  4709  4727 I TempRoot-boot: ladder attempt 1: exec /data/user/0/com.xplay6.temproot/files/broot7 rounds=24 log=/storage/emulated/0/Android/data/com.xplay6.temproot/files/broot7.log
+07-03 13:25:32.633  4709  4727 I TempRoot-boot: broot7 attempt 1 rc=0: 
+07-03 13:25:32.651  4709  4727 I TempRoot-boot: broot7 steps: TASKVA=  (no agreement yet: one candidate per tsk so far, add rounds -> nothing published) | TASKVA=0xffffffc052083d40 pid=5086 agreement=8 cred=0xffffffc052084200 real_cred=0xffffffc052084398 prio=0xffffffc052083d94 | L7: supervisor pid=5124 ready | L7: enforce file says '1'; opening a brief permissive window | writer: answer ok @ffffffc001d5dbe4 | L7: enforce file now reads '0' (want '0') | L7: task=0xffffffc052083d40 uid=10151 securebits=0 | writer: answer ok @ffffffc001a41b54 | writer: answer ok @ffffffc001a41be0 | writer: answer ok @ffffffc001a4ad90 | --- round 0: arm failed | --- round 1: arm failed | --- round 2: arm failed | --- round 3: arm failed | writer: answer ok @ffffffc001a4ad2c | writer: answer ok @ffffffc001a4ad08 | writer: answer ok @ffffffc052084200 | writer: answer ok @ffffffc001a41be0 | L7: borrow confirmed by cred readback 0 -> ffffffc001a4ad08 (uid=0 sb=64) | --- round 0: arm failed | writer: answer ok @ffffffc001a41be0 | L7: read channel confirmed (cred->group_info reads back the value we planted) | --- round 0: arm failed | writer: answer ok @ffffffc001a41be0 | L7: real_cred=0xffffffc11322de00 root_user=0xffffffc001a49658 (both read back through the channel) | --- round 0: arm failed | --- round 1: arm failed | writer: answer ok @ffffffc052084200 | L7: window closed, uid back to 10151 (started as 10151) | writer: answer ok @ffffffc052084200 | writer: answer ok @ffffffc001a41be0 | L7: borrow confirmed by cred readback ffffffc11322de00 -> ffffffc001a4ad08 (uid=0 sb=64) | --- round 0: arm failed | writer: answer ok @ffffffc001a41be0 | --- round 0: arm failed
+07-03 13:25:32.723  4709  4727 I TempRoot-boot:   root probe [tcp+token (xport: open /data/local/tmp/.sud/req/req-4709 errno=13)]: uid=0(root) gid=0(root) groups=0(root),3003(inet),9997(everybody),50151(all_a151) context=u:r:init:s0
+07-03 13:25:32.723  4709  4727 I TempRoot-boot: Enforcing
+07-03 13:25:32.723  4709  4727 I TempRoot-boot: /proc/self/status:CapEff:	0000003fffffffff
+07-03 13:25:32.723  4709  4727 I TempRoot-boot: 
+07-03 13:25:32.723  4709  4727 I TempRoot-boot: @SUD_EXIT=0
+07-03 13:25:32.723  4709  4727 I TempRoot-boot: state after: rc=0 uid=10151 enforce=Enforcing modprobe=/sbin/modprobe
+07-03 13:25:32.725  4709  4727 I TempRoot-boot: marked this boot as escalated, epoch=1530595269
+07-03 13:25:32.987  4709  4727 I TempRoot-boot: hpgain 601: FIRED（读不回是设计如此・生效要等下一次耳机路使能）
+07-03 13:25:33.270  4709  4727 I TempRoot-boot:   sugate7 open: rc=-2 sugate7-open in-process read of modprobe_path: /sbin/modprobesugate7-open alias entry addr=0xffffffc001f4cff8 rounds=24 rc=1sugate7-open witness write addr=0xffffffffc1a499b8 (=0xffffffc001a499b8 through the alias) rounds=24 rc=0sugate7-open done: caller must read /proc/sys/kernel/modprobe as root, it must be "/zz".  If it is not, call abort -- never patch.
+07-03 13:25:33.270  4709  4727 I TempRoot-boot: sugate7 attempt 1: rc=-2 sugate7-open in-process read of modprobe_path: /sbin/modprobesugate7-open alias entry addr=0xffffffc001f4cff8 rounds=24 rc=1sugate7-open witness write addr=0xffffffffc1a499b8 (=0xffffffc001a499b8 through the alias) rounds=24 rc=0sugate7-open done: caller must read /proc/sys/kernel/modprobe as root, it must be "/zz".  If it is not, call abort -- never patch.
+07-03 13:25:38.810  4709  4727 I TempRoot-boot:   sugate7 open: rc=0 sugate7-open in-process read of modprobe_path: /sbin/modprobesugate7-open alias entry addr=0xffffffc001f4cff8 rounds=24 rc=1sugate7-open witness write addr=0xffffffffc1a499b8 (=0xffffffc001a499b8 through the alias) rounds=24 rc=1sugate7-open done: caller must read /proc/sys/kernel/modprobe as root, it must be "/zz".  If it is not, call abort -- never patch.
+07-03 13:25:38.839  4709  4727 I TempRoot-boot:   window PROVEN through the alias: modprobe_path "/sbin/modprobe" -> "/zz"
+07-03 13:25:39.086  4709  4727 I TempRoot-boot:   sugate7 restore: rc=0 sugate7-restore write "/sbin/modprobe" as the full 64-byte modprobe_path addr=0xffffffffc1a499b8 rounds=24 rc=1
+07-03 13:25:39.116  4709  4727 I TempRoot-boot:   restore witnessed: "/sbin/modprobe" came back through the alias, both directions proven
+07-03 13:25:39.123  4709  4727 I TempRoot-boot:   sugate7 patch: rc=-4 sugate7-patch addr=0xffffffffc0323400 (=0xffffffc000323400 via alias) rounds=24 rc=0sugate7-patch missed, rollback rc=0
+07-03 13:25:39.123  4709  4727 I TempRoot-boot: sugate7 attempt 2: rc=-4 sugate7-patch addr=0xffffffffc0323400 (=0xffffffc000323400 via alias) rounds=24 rc=0sugate7-patch missed, rollback rc=0
+07-03 13:25:44.177  4709  4727 I TempRoot-boot:   sugate7 open: rc=-1 sugate7-open in-process read of modprobe_path: /sbin/modprobesugate7-open alias entry addr=0xffffffc001f4cff8 rounds=24 rc=0sugate7-open stop: the alias was not planted, nothing else was written
+07-03 13:25:44.177  4709  4727 I TempRoot-boot: sugate7 attempt 3: rc=-1 sugate7-open in-process read of modprobe_path: /sbin/modprobesugate7-open alias entry addr=0xffffffc001f4cff8 rounds=24 rc=0sugate7-open stop: the alias was not planted, nothing else was written
+07-03 13:25:49.723  4709  4727 I TempRoot-boot:   sugate7 open: rc=0 sugate7-open in-process read of modprobe_path: /sbin/modprobesugate7-open alias entry addr=0xffffffc001f4cff8 rounds=24 rc=1sugate7-open witness write addr=0xffffffffc1a499b8 (=0xffffffc001a499b8 through the alias) rounds=24 rc=1sugate7-open done: caller must read /proc/sys/kernel/modprobe as root, it must be "/zz".  If it is not, call abort -- never patch.
+07-03 13:25:49.747  4709  4727 I TempRoot-boot:   window PROVEN through the alias: modprobe_path "/sbin/modprobe" -> "/zz"
+07-03 13:25:49.993  4709  4727 I TempRoot-boot:   sugate7 restore: rc=0 sugate7-restore write "/sbin/modprobe" as the full 64-byte modprobe_path addr=0xffffffffc1a499b8 rounds=24 rc=1
+07-03 13:25:50.022  4709  4727 I TempRoot-boot:   restore witnessed: "/sbin/modprobe" came back through the alias, both directions proven
+07-03 13:25:50.260  4709  4727 I TempRoot-boot:   sugate7 patch: rc=0 sugate7-patch addr=0xffffffffc0323400 (=0xffffffc000323400 via alias) rounds=24 rc=1sugate7-patch written (NOP at 0x323400); caller must witness by execve of a file named su
+07-03 13:25:50.261  4709  4727 I TempRoot-boot: sugate7 attempt 4: rc=0 sugate7-patch addr=0xffffffffc0323400 (=0xffffffc000323400 via alias) rounds=24 rc=1sugate7-patch written (NOP at 0x323400); caller must witness by execve of a file named su
+07-03 13:25:50.302  4709  4727 I TempRoot-boot: staged /data/user/0/com.xplay6.temproot/files/su bytes=2143768 canExec=true
+07-03 13:25:50.339  4709  4727 I TempRoot-boot: staged /data/user/0/com.xplay6.temproot/files/nsmbind bytes=2169624 canExec=true
+07-03 13:25:50.460  4709  4727 I TempRoot-boot:   nsmbind: ns: joined PID 1's mount namespace|published /data/local/tmp/.sud/nsmbind/su|published /data/local/tmp/.sud/nsmbind/sux|OK bound 2 name(s) from /data/local/tmp/
+07-03 13:25:50.535  4709  4727 I TempRoot-boot:   PATH witness: drwxr-xr-x 2 root root 4096 2018-07-02 13:30 /sbin|-rwxr-xr-x 1 root root u:object_r:shell_data_file:s0 2143768 2018-07-03 13:25 /sbin/sux||@SUD_EXIT=0
+07-03 13:25:50.541  4709  4727 I TempRoot-boot:   app-exec su: execve allowed (out=usage: su [-c <cmd>] [uid]   (temp-root sud client)|)
+07-03 13:25:50.573  4709  4727 I TempRoot-boot: staged /data/user/0/com.xplay6.temproot/files/relayd bytes=2157032 canExec=true
+07-03 13:25:50.579  4709  4727 I TempRoot-boot: relay: started (audit trail: /storage/emulated/0/Android/data/com.xplay6.temproot/files/relayd.log)
+07-03 13:25:50.579  4709  4727 I TempRoot-boot: route 7 owns its own enforcing flip (broot7 does it after the daemon is up); Java's mapPlanted flag only tracks route 6's JNI plant
+07-03 13:25:50.585  4709  5347 I TempRoot-boot: daemon probe :12346 answered -- daemon is up
+07-03 13:25:50.603  4709  4727 I TempRoot-boot: job schedule rc=1 latency=600000

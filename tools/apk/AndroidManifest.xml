@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.xplay6.temproot"
-    android:versionCode="1"
-    android:versionName="1.6">
+    android:versionCode="53"
+    android:versionName="1.9.33">
 
     <!-- targetSdk 22: this device is API 23 and the app must keep the pre-M
          behaviour for exec/load of its own files dir. -->
@@ -15,12 +15,13 @@
 
     <application
         android:allowBackup="false"
-        android:label="月虹提权助手"
+        android:label="xplay6 tmproot"
         android:theme="@android:style/Theme.Material.NoActionBar">
 
         <activity
             android:name=".Main"
-            android:exported="true">
+            android:exported="true"
+            android:windowSoftInputMode="adjustResize">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />

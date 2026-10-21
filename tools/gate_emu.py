@@ -129,24 +129,70 @@ def run(binary, mode):
 
 
 def device_expectations():
-    """The 2026-10-14 on-device run, for the labels our cases can be matched to."""
+    """The on-device run, keyed BOTH by label and by the raw path the probe prints.
+
+    sugate_probe labels its execve-variations rows with the PATH itself (`CASE /data/.../su2 -> RAN`),
+    so matching only on labels silently drops most of the device evidence and understates the
+    denominator -- an emulator-vs-device comparison is worth exactly as much as its coverage.
+    """
     want = {}
+    if FINGER is None:
+        print("  NOTE: this profile has no recorded fingerprint file, so the device column stays"
+              " '-' -- run sugate_probe read-only on that device to make the second method real")
+        return want
     if not os.path.exists(FINGER):
         return want
     for line in open(FINGER, errors="replace"):
         m = re.match(r"^CASE\s+(\S+)\s+->\s+(.*)$", line)
         if not m:
             continue
-        label, verdict = m.group(1), m.group(2)
+        key, verdict = m.group(1), m.group(2)
         if "errno=1" in verdict:
-            want[label] = "deny"
+            v = "deny"
         elif "RAN" in verdict or "WARNING" in verdict or "linker" in verdict:
-            want[label] = "allow"
+            v = "allow"
+        else:
+            continue          # ENOTDIR/EBADY/etc: path semantics, not the gate -- not a witness
+        want[key] = v
     return want
 
 
+PROFILES = {
+    "6.0.1": dict(img="fw/Image", gate=0xFFFFFFC000332688, gate_end=0xFFFFFFC0003326E4,
+                  bl1=0xFFFFFFC00033269C, bl2=0xFFFFFFC0003326CC, patch=0xFFFFFFC0003326B4,
+                  tgt1=0xFFFFFFC000493FF0, tgt2=0xFFFFFFC0003324A0, finger=FINGER),
+    # 7.1.1: the same function, moved.  Offsets inside it are byte-identical to 6.0.1, which is
+    # why the premises below (GATE+4 is `mov w1,#0x2f`, GATE+0x20 is `mov w0,#0`, GATE_END-4 is
+    # `ret`) still hold; BL1's target is strrchr in 7's own kallsyms (a T hit).
+    "7": dict(img="fw/7/Image", gate=0xFFFFFFC00033F434, gate_end=0xFFFFFFC00033F490,
+              bl1=0xFFFFFFC00033F448, bl2=0xFFFFFFC00033F478, patch=0xFFFFFFC00033F460,
+              tgt1=0xFFFFFFC0004A26B0, tgt2=0xFFFFFFC00033F24C,
+              finger=os.path.join(ROOT, "art", "sgt-20261020-7-finger.txt")),
+}
+
+
+def apply_profile(prof):
+    global IMG, FINGER, GATE, GATE_END, BL_STRRCHR, BL_HELPER, PATCH_SITE
+    global EXPECT_BL1_TARGET, EXPECT_BL2_TARGET
+    if prof not in PROFILES:
+        raise SystemExit("unknown --profile %r (have: %s)" % (prof, ", ".join(PROFILES)))
+    P = PROFILES[prof]
+    IMG = os.path.join(ROOT, *P["img"].split("/"))
+    FINGER = P["finger"]
+    GATE, GATE_END = P["gate"], P["gate_end"]
+    BL_STRRCHR, BL_HELPER, PATCH_SITE = P["bl1"], P["bl2"], P["patch"]
+    EXPECT_BL1_TARGET, EXPECT_BL2_TARGET = P["tgt1"], P["tgt2"]
+    return P
+
+
 def main():
-    print("== premises from fw/Image ==")
+    argv = sys.argv[1:]
+    prof = "6.0.1"
+    for i, x in enumerate(argv):
+        if x == "--profile" and i + 1 < len(argv):
+            prof = argv[i + 1]
+    P = apply_profile(prof)
+    print("== premises from %s (profile %s) ==" % (P["img"], prof))
     emit_header()
     binary = build()
 
@@ -165,7 +211,7 @@ def main():
     for path, label, expect in CASES:
         g = "deny" if orig.get(path, 0) < 0 else "allow"
         p = "deny" if patched.get(path, 0) < 0 else "allow"
-        d = want.get(label, "-")
+        d = want.get(label, want.get(path, "-"))
         print("%-34s %-8s %-8s %-8s" % (path.replace(D, "..."), g, expect, d))
         if g != expect:
             bad.append("original bytes: %s -> %s, expected %s" % (path, g, expect))
@@ -174,13 +220,20 @@ def main():
         if d != "-" and g != d:
             bad.append("emulator disagrees with the device run on %s (%s vs %s)" % (label, g, d))
 
-    n_dev = sum(1 for _, l, _ in CASES if l in want)
+    n_dev = sum(1 for pp, ll, _ in CASES if ll in want or pp in want)
     print("\ncompared against the recorded device fingerprint on %d/%d labels" % (n_dev, len(CASES)))
     for b in bad:
         print("  MISMATCH: " + b)
     if bad:
         print("\nVERDICT: not established -- resolve the mismatches before touching the phone")
         return 1
+    if n_dev == 0:
+        # The bytes-only result is still worth having, but it must not read as "verified against
+        # the device": the second, independent method is exactly what is missing on this profile.
+        print("\nVERDICT: BYTES-ONLY -- the emulator's 21 paths agree with the CASES table and the "
+              "single 4-byte patch makes every name allow, but NO device fingerprint was compared "
+              "(0/%d). Re-run sugate_probe read-only on this kernel to close that." % len(CASES))
+        return 0
     print("\nVERDICT: real gate bytes reproduce the measured behaviour, and the single "
           "4-byte patch makes every name allow => one write is sufficient")
     return 0

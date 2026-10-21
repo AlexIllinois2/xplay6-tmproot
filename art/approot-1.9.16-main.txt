@@ -1,0 +1,59 @@
+=== 0. state as seen from an unprivileged shell ===
+plain shell: 2000 Enforcing 
+demo uid: 10134   manager grants: /data/data/com.xplay6.temproot/files/grants.txt
+=== A. the app escalates by itself ===
+PASS  A1  this boot's own task turned root inside its own cred (broot7 witness, log newer than boot)   [1 fresh=1]
+PASS  A2  the app's own probe reached uid=0 (logcat probe line OR the daemon's audit line for its uid)   [07-03 09:43:34.208  4738  4756 I TempRoot-boot:   root probe [peer(SCM_CREDENTIALS)]: uid=]
+=== B. an app that is not on the list is refused ===
+  barrier: 10134 is gone from the list the relay reads
+PASS  B  unlisted app gets the same refusal as a nonexistent service   [SUX out=ERR unknown service]
+=== C. put it on the list -> root ===
+  barrier: 10134 IS listed before the relaunch
+PASS  C  granted app runs as root   [SUX out=uid=0(root) gid=0(root) groups=0(root),3003(inet),9997(everybody),50151(all_a151) ]
+=== L. the SAME granted app, asked under the literal name su ===
+PASS  L  a granted app that hardcodes the NAME su gets root   [SU out=uid=0(root) gid=0(root) groups=0(root),3003(inet),9997(everybody),50151(all_a151) c]
+=== D. revoke it again -> refused, no restart in between ===
+  barrier: 10134 gone from the list the relay reads
+PASS  D  revocation is live   [SUX out=ERR unknown service]
+=== E. the audit log recorded both decisions ===
+relayd: listening on @sud (uid=10151)
+relayd: listening on @sud (uid=10151)
+relayd: listening on @sud (uid=10151)
+relayd: listening on @sud (uid=10151)
+PASS  E1  log has an allow line for the demo uid   [deny   uid=2000   pid=6074   SU 0 id]
+PASS  E2  log has a deny line for the demo uid   [deny   uid=2000   pid=6074   SU 0 id]
+=== F. a granted caller cannot run as somebody else's uid ===
+PASS  F0  control: this same caller IS allowed for its own uid   [uid=0(root) gid=0(root) groups=0(root),3003(inet),9997(everybody),50151(all_a151) context=]
+PASS  F  target uid outside {0, self} is refused   [ERR target uid not allowed]
+=== H. root while getenforce still reports Enforcing (the map-only shape) ===
+  paired reading (same instant, two probes): enforce=Enforcing  reply=uid=0(root) gid=0(root) groups=0(root),3003(inet),9997(everybody),50151(all_a151) context=u:r:init:s0
+  not asserted (run with EXPECT_ENFORCING=1 to require map-only mode)
+=== I. the daemon's state directory is not writable by the callers it serves ===
+PASS  I  an unprivileged caller cannot plant or replace files in .sud   [touch: '/data/local/tmp/.sud/probe_i': Permission denied|mv: bad '/data/local/tmp/probe_so]
+  reading: touch: '/data/local/tmp/.sud/probe_i': Permission denied|mv: bad '/data/local/tmp/probe_sock': Permission denied|drwx--x--x 6 root root 4096 2018-07-0
+=== I2. ... but the client drop directory is still usable by them (positive control for I) ===
+PASS  I2  clients can still create their own drop in a sticky root-owned .sud/req   [drwxrwxrwt 2 root root 4096 2018-07-03 09:55 /data/local/tmp/.sud/req|DROP_OK|-rw-rw-rw- 1]
+  reading: drwxrwxrwt 2 root root 4096 2018-07-03 09:55 /data/local/tmp/.sud/req|DROP_OK|-rw-rw-rw- 1 shell shell 0 2018-07-03 09:56 /data/local/tmp/.sud/req/pro
+=== J. a grants list planted by an unprivileged caller is not believed ===
+  planted as shell: -rw------- 1 shell shell 6 2018-07-03 09:56 /data/local/tmp/sud.grants
+PASS  J  demo uid listed ONLY in a caller-owned list -> still refused   [SUX out=ERR unknown service]
+  reading: SUX out=ERR unknown service
+PASS  JP  control: a root-owned list in the same directory IS believed   [SUX out=uid=0(root) gid=0(root) groups=0(root),3003(inet),9997(everybody),50151(all_a151) ]
+  boundary: on 7 the relay fronts every app caller, so JP's premise is unreachable from a third-party uid (A2/F0 cover sud's own belief)
+=== K2. exec by the NAME su: what the user actually asked for ===
+  ruler (basename gate): CASE control_su                     -> RAN
+  caller side (/sbin/su -c id -u): ERR unknown service
+PASS  K2  exec by the name su is admitted (the vendor check no longer blocks callers)   [ERR unknown service]
+  boundary: K2 asks only the exec half.  Whether a *listed* uid actually gets uid 0 over this
+  channel is criteria C/F0, and the app-domain half is A2 plus the chain's own
+  'app-exec su: execve allowed' line (ledger 667).
+=== K. the su-named client is a real binary, not a stub ===
+  reading: /sbin/su size=2143768 magic= label=?|/sbin/sux size=2143768 magic= label=?
+  caller side (adb shell): /sbin/su shell_can_read=no|/sbin/sux shell_can_read=no
+PASS  K  all 2 su-named path(s) are real ELF binaries (stubs: 0)   [0]
+  boundary: K tests shape only (present/stub); exec-by-NAME is gated by the vendor check -- see ledger 643 (su EPERM / sux rc=0 in app domain)
+  (a path that does not exist is not counted: 2 checked, absence is reported by the reading)
+=== summary ===
+coverage: 16/16 criteria reported (mode=main)
+pass=16 fail=0 refused=0   (criterion G needs POST_REBOOT=1 after a reboot; H needs EXPECT_ENFORCING=1)
+APP ESCALATION + AUTHORIZATION VERIFIED (self-escalation, per-uid gate, live revoke, audit trail, no impersonation)

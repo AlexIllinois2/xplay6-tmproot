@@ -1,0 +1,21 @@
+1.9.19 / versionCode 40 —— 耳机增益两档开关 + 开机自动落位（已验）
+VERIFIED ON DEVICE（2026-10-20，设备钟 13:25 现读・全程内存态・未写分区）:
+  - pm install -r -t = Success；dumpsys 现读 versionCode=40；包 sha256 47337ef9ccdce774…
+  - app 自己那条路（Chain.root → SU 通道）：点「耳机增益 本机」→ 面板「已写入…」，files/hpgain=stock，
+    属主/标签 = u0_a151:u0_a151 + app_data_file:s0:c512,c768（app 自己写的形状，非 root 造的 inode）
+  - 开机自动落位：TempRoot-boot 现读 `hpgain 601: FIRED（读不回是设计如此…）`
+    留底 = art/chain-1.9.19-boot.txt（证人只能在开机前挂流取到：环固定 256 KB）
+  - 交付字节：assets/broot7 4ba5e5355632… ／ lib/arm64-v8a/libesc.so 95d7a617ac53… 与 1.9.17 逐字节相同；
+    整包按条目只有 AndroidManifest.xml・3 枚 META-INF・classes.dex 五处不同
+  - 主机侧闸：gate_constants 18 对／9 臂 rc=0；runbook_citations・port_manifest 两把闸 rc=0
+NOT VERIFIED / 边界:
+  - 这枚内核写**没有回读面**（台账 §603）：CLOBBER OK 只证"打到"，不证"值"；效果面＝人耳 AB
+  - 开关依赖 /data/local/tmp/clobber（2 164 616 B・dev-pushed，刻意未进 APK 资产）；缺件时按钮回「没打到 -> …」＝响亮失败
+  - 切换后要耳机路重新使能（暂停→播放／切歌／拔插）才吃到：列在 enable 事件上锁存（§367/§370）
+  - 机主判决：B（7 自己的 DT 值）为要留的档；机器现停在该档（files/hpgain=stock）
+
+归档（老样子・全套）
+  月虹提权助手-v1.9.19-src-docs.tar.gz —— 400 枚文件・约 8.9 MB・瘦包（不含 fw/*Image，两枚 sha256 写在 INTEGRITY.txt B 段）
+  ARCHIVE-SHA256.txt 与 SHA256SUMS.txt 在 tar **外面**（tar 不能包含自己的哈希），并在 release/1.9.19/ 内以裸文件名校验
+  重建证人（在解开的树里实跑・见 README-ARCHIVE.txt）：无镜像 ⇒ rc=1 且不出 APK；SKIP_GATE=1 ⇒ rc=0・
+  八枚成员与包内 APK 逐字节相同・同签名 12be07da…ca0b

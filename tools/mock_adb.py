@@ -37,15 +37,35 @@ VA_START = (0xFFFFFFFFFFFFFFFF << VA_BITS) & M64
 PAGE_OFFSET = (0xFFFFFFFFFFFFFFFF << (VA_BITS - 1)) & M64
 GB = 1 << 30
 PHYS = 0x40000000        # memstart, measured on device 2026-10-14 via /proc/iomem (System RAM 0x40000000-)
-TEXT0, TEXT1 = 0xFFFFFFC000200000, 0xFFFFFFC001400000
-BSS0, BSS1 = 0xFFFFFFC0017D7810, 0xFFFFFFC001B43000
-PGD0 = 0xFFFFFFC001B41000
+TEXT0 = 0xFFFFFFC000200000
+# Two kernels, two address sets.  Every value here is one tools/pgdalias.py asserts on its own
+# (image + kallsyms + /proc/iomem), so a mock disagreeing with the driver fails loudly instead of
+# quietly letting an unwitnessed write through -- on 7 the witness is a STRING, and a mock that
+# only models getenforce could never see it move.
+PROFILES = {
+    "6.0.1": dict(text1=0xFFFFFFC001400000, data0=0xFFFFFFC00161E000, end=0xFFFFFFC001B43000,
+                  pgd0=0xFFFFFFC001B41000, gate=0xFFFFFFC0003326B4, island=0xFFFFFFC000339DB8,
+                  kind="enforce", witness=0xFFFFFFC00189BE74,
+                  gate_orig=0x54000121, gate_patch=0x14000009),
+    "7": dict(text1=0xFFFFFFC001800000, data0=0xFFFFFFC001A31000, end=0xFFFFFFC001F4E000,
+              pgd0=0xFFFFFFC001F4C000, gate=0xFFFFFFC000323400, island=0xFFFFFFC000342C88,
+              kind="modprobe", witness=0xFFFFFFC001A499B8,
+              # The LIVE site on 7 (ledger 664): the `tbnz w0,#0x1f` that consumes G@0x342b68's
+              # verdict in do_execveat_common.  Patching it to a NOP makes the `mov w19,#-1`
+              # (EPERM) producer unreachable.  Retired: 0x33f460 (§650) and 0x3416cc (§654).
+              gate_orig=0x37F823A0, gate_patch=0xD503201F),
+}
+MP = PROFILES[os.environ.get("MOCK_PROFILE", "6.0.1")]
+TEXT1, BSS0, BSS1 = MP["text1"], MP["data0"], MP["end"]
+PGD0 = MP["pgd0"]
 SWAP_NEXT = PGD0 + 0x1000                      # head.S's static pmd page (§173's candidate)
-GATE_VA = 0xFFFFFFC0003326B4
-SELINUX_ENF = 0xFFFFFFC00189BE74        # the .bss word the driver uses for its no-op sanity write
-ISLAND_VA = 0xFFFFFFC000339DB8
+GATE_VA = MP["gate"]
+SELINUX_ENF = MP["witness"]           # 6.0.1: the .bss enforce word; 7: the modprobe_path buffer
+ISLAND_VA = MP["island"]
+WITNESS_KIND = MP["kind"]
+MOD_DEFAULT = "/sbin/modprobe"        # what the device reads today (measured 2026-10-20, uid 2000)
 WRI, FAULT = 69644, 69632
-GATE_ORIG, GATE_PATCH = 0x54000121, 0x14000009
+GATE_ORIG, GATE_PATCH = MP["gate_orig"], MP["gate_patch"]
 
 
 def st():
@@ -100,6 +120,18 @@ def legal_block(d, level_shift):
     return (d & 3) == 1 and (d >> 10) & 1 and not ((d >> 12) & ((1 << (level_shift - 12)) - 1))
 
 
+def write_string(s, data):
+    """Land `data` at the head of the modprobe_path buffer, which is a fixed-size ARRAY: what the
+    kernel prints afterwards is the bytes up to the FIRST NUL, so writing "/zz\0" hides the tail
+    without erasing it -- restoring the first four bytes brings the whole path back.  Truncating
+    the stored tail here would invent a device bug and make the driver's restore check refuse a
+    window that is actually fine (which is exactly what it did the first time this arm ran)."""
+    buf = bytearray(s.get("modbuf") or (MOD_DEFAULT + "\0" * 64).encode())
+    buf[0:len(data)] = data[:len(buf)]
+    s["modbuf"] = list(buf)
+    s["mod"] = bytes(buf).split(b"\0", 1)[0].decode("ascii", "replace")
+
+
 def do_clobber(args, s):
     if "kern" not in args:
         return 0
@@ -134,7 +166,10 @@ def do_clobber(args, s):
             if os.environ.get("MOCK_NO_ALIAS") != "1":
                 # negative control: this device simply refuses the alias, so nothing opens
                 s["slots"][str(base)] = str(pa_block)
-    if real == SELINUX_ENF and nbytes == 4:
+    if WITNESS_KIND == "modprobe":
+        if real == SELINUX_ENF and hexs:
+            write_string(s, bytes.fromhex(hexs))   # a string buffer: bytes land, NUL ends it
+    elif real == SELINUX_ENF and nbytes == 4:
         s["enf"] = "Enforcing" if word else "Permissive"   # data writes are coherent: no cache fiction
     if SWAP_NEXT <= va < SWAP_NEXT + 0x1000 and nbytes == 8 and legal_block(word, 21):
         s["flip"] = True                         # the §173 pmd-flip fallback
@@ -145,7 +180,12 @@ def do_clobber(args, s):
     if nbytes == 4 and word == 0 and abs(real - ISLAND_VA) < 0x60:
         s["island"] = True                     # the harmless proof-write landed
     if va == SELINUX_ENF and os.environ.get("MOCK_WRONG") == "1":
-        s["enf"] = "Permissive"                # the no-op payload landed as something else
+        # the no-op payload landed as something else -- step 2b exists precisely to catch this,
+        # so it must be observable through BOTH witness shapes
+        if WITNESS_KIND == "modprobe":
+            write_string(s, b"/zz")
+        else:
+            s["enf"] = "Permissive"
     print("readv = %d (expected %d) errno=%d" % (expected, expected, 0))
     print("RESULT: PRIMITIVE WORKS")
     save(s)
@@ -229,6 +269,11 @@ def main():
             if m and "echo 1 >" in cmd:
                 s["conv"][m.group(1)] = True     # the up path runs ic iallu (cpu0 never)
                 save(s)
+        return 0
+    if "/proc/sys/kernel/modprobe" in cmd:
+        # stateful, exactly like getenforce: on 7 this string IS the witness, so a write that
+        # does not land must leave it unchanged and a write that lands must show up here
+        print(s.get("mod", MOD_DEFAULT))
         return 0
     for pat, out in SHELL.items():
         if pat in cmd:
