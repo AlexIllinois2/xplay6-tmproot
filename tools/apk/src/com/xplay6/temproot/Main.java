@@ -1,7 +1,11 @@
 package com.xplay6.temproot;
 
 import android.app.Activity;
+import android.app.AlertDialog;
+import android.content.DialogInterface;
+import android.content.Intent;
 import android.graphics.drawable.ColorDrawable;
+import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -39,7 +43,7 @@ import java.util.Set;
  * still the product: a row's switch IS the decision, written to disk right away. */
 public final class Main extends Activity {
 
-    private static final int PAGE_HOME = 0, PAGE_APPS = 1, PAGE_SETTINGS = 2;
+    private static final int PAGE_HOME = 0, PAGE_MODULES = 1, PAGE_APPS = 2, PAGE_SETTINGS = 3;
 
     private Ui u;
     private final Handler ui = new Handler(Looper.getMainLooper());
@@ -51,7 +55,9 @@ public final class Main extends Activity {
     private boolean appsLoaded, loading;
     private int page = PAGE_HOME;
 
-    private final FrameLayout[] pages = new FrameLayout[3];
+    private final FrameLayout[] pages = new FrameLayout[4];
+    /* 模块页保留在代码里（EscService 开机仍会跑 Modules.bootRun），但导航不再暴露入口。 */
+    private final int[] navPages = { PAGE_HOME, PAGE_APPS, PAGE_SETTINGS };
     private final View[] navItems = new View[3];
     private final FrameLayout[] navPills = new FrameLayout[3];
     private final ImageView[] navIcons = new ImageView[3];
@@ -76,6 +82,13 @@ public final class Main extends Activity {
     private LinearLayout gainRow601, gainRowStock;
     private ImageView gainCheck601, gainCheckStock;
     private TextView gainNote;
+
+    private final List<Modules.ModEntry> mods = new ArrayList<Modules.ModEntry>();
+    private BaseAdapter modAdapter;
+    private ListView modList;
+    private TextView modSummary, modEmpty;
+    private boolean modsLoaded, modsLoading;
+    private static final int PICK_MODULE = 4242;
 
     private FrameLayout logOverlay;
     private TextView logBody;
@@ -110,6 +123,7 @@ public final class Main extends Activity {
 
         FrameLayout host = new FrameLayout(this);
         pages[PAGE_HOME] = new FrameLayout(this);
+        pages[PAGE_MODULES] = new FrameLayout(this);
         pages[PAGE_APPS] = new FrameLayout(this);
         pages[PAGE_SETTINGS] = new FrameLayout(this);
         for (int i = 0; i < pages.length; i++) {
@@ -118,6 +132,7 @@ public final class Main extends Activity {
             pages[i].setVisibility(i == PAGE_HOME ? View.VISIBLE : View.GONE);
         }
         pages[PAGE_HOME].addView(buildHome(), new FrameLayout.LayoutParams(-1, -1));
+        pages[PAGE_MODULES].addView(buildModules(), new FrameLayout.LayoutParams(-1, -1));
         pages[PAGE_APPS].addView(buildApps(), new FrameLayout.LayoutParams(-1, -1));
         pages[PAGE_SETTINGS].addView(buildSettings(), new FrameLayout.LayoutParams(-1, -1));
 
@@ -641,6 +656,322 @@ public final class Main extends Activity {
         updateHomeStats();
     }
 
+    /* -------------------------------------------------------------- modules */
+
+    private View buildModules() {
+        LinearLayout pageRoot = new LinearLayout(this);
+        pageRoot.setOrientation(LinearLayout.VERTICAL);
+
+        LinearLayout head = new LinearLayout(this);
+        head.setOrientation(LinearLayout.VERTICAL);
+        head.setPadding(u.dp(20), u.dp(18), u.dp(20), 0);
+        head.addView(u.heading("模块", 28, Ui.TEXT));
+        TextView sub = u.text("Magisk 格式模块包（zip）· 挂进 /system · 重启失效", 13, Ui.MUTED, Ui.REG);
+        LinearLayout.LayoutParams subLp = new LinearLayout.LayoutParams(-1, -2);
+        subLp.topMargin = u.dp(5);
+        head.addView(sub, subLp);
+
+        TextView installBtn = u.text("安装模块 (zip)", 14, Ui.ON_PRIMARY, Ui.MED);
+        installBtn.setGravity(Gravity.CENTER);
+        installBtn.setBackground(u.press(u.shape(Ui.PRIMARY, 24)));
+        installBtn.setClickable(true);
+        installBtn.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                pickModule();
+            }
+        });
+        LinearLayout.LayoutParams ibLp = new LinearLayout.LayoutParams(-1, u.dp(46));
+        ibLp.topMargin = u.dp(16);
+        head.addView(installBtn, ibLp);
+
+        modSummary = u.text("正在读取模块列表…", 12, Ui.MUTED, Ui.REG);
+        LinearLayout.LayoutParams sumLp = new LinearLayout.LayoutParams(-1, -2);
+        sumLp.topMargin = u.dp(14);
+        sumLp.leftMargin = u.dp(4);
+        sumLp.bottomMargin = u.dp(2);
+        head.addView(modSummary, sumLp);
+        pageRoot.addView(head, new LinearLayout.LayoutParams(-1, -2));
+
+        FrameLayout listHost = new FrameLayout(this);
+        modList = new ListView(this);
+        modList.setBackgroundColor(0x00000000);
+        modList.setCacheColorHint(0x00000000);
+        modList.setDivider(new ColorDrawable(0xFF26242C));
+        modList.setDividerHeight(1);
+        modList.setSelector(new ColorDrawable(0x00000000));
+        modList.setVerticalScrollBarEnabled(false);
+        modList.setOverScrollMode(View.OVER_SCROLL_NEVER);
+        modList.setFadingEdgeLength(0);
+        modList.setPadding(u.dp(20), u.dp(8), u.dp(20), u.dp(16));
+        modList.setClipToPadding(false);
+        modAdapter = new BaseAdapter() {
+            @Override
+            public int getCount() {
+                return mods.size();
+            }
+
+            @Override
+            public Object getItem(int pos) {
+                return mods.get(pos);
+            }
+
+            @Override
+            public long getItemId(int pos) {
+                return pos;
+            }
+
+            @Override
+            public View getView(int pos, View cv, ViewGroup parent) {
+                return modRow(pos, cv, mods.get(pos));
+            }
+        };
+        modList.setAdapter(modAdapter);
+        modEmpty = u.text("还没有安装任何模块", 13, Ui.MUTED, Ui.REG);
+        modEmpty.setGravity(Gravity.CENTER);
+        modEmpty.setPadding(u.dp(20), u.dp(20), u.dp(20), u.dp(20));
+        listHost.addView(modList, new FrameLayout.LayoutParams(-1, -1));
+        listHost.addView(modEmpty, new FrameLayout.LayoutParams(-1, -1));
+        modList.setEmptyView(modEmpty);
+        pageRoot.addView(listHost, new LinearLayout.LayoutParams(-1, 0, 1f));
+        return pageRoot;
+    }
+
+    private static final class ModRowHolder {
+        TextView name, detail, desc;
+        Ui.Toggle toggle;
+    }
+
+    private View modRow(int pos, View cv, final Modules.ModEntry e) {
+        LinearLayout row;
+        ModRowHolder h;
+        if (cv instanceof LinearLayout && ((LinearLayout) cv).getTag() instanceof ModRowHolder) {
+            row = (LinearLayout) cv;
+            h = (ModRowHolder) row.getTag();
+        } else {
+            row = new LinearLayout(this);
+            row.setOrientation(LinearLayout.HORIZONTAL);
+            row.setGravity(Gravity.CENTER_VERTICAL);
+            row.setMinimumHeight(u.dp(72));
+            row.setPadding(u.dp(16), u.dp(10), u.dp(14), u.dp(10));
+            h = new ModRowHolder();
+
+            LinearLayout col = new LinearLayout(this);
+            col.setOrientation(LinearLayout.VERTICAL);
+            col.setLayoutParams(new LinearLayout.LayoutParams(0, -2, 1f));
+            h.name = u.text("", 15, Ui.TEXT, Ui.MED);
+            h.name.setSingleLine(true);
+            h.name.setEllipsize(TextUtils.TruncateAt.END);
+            col.addView(h.name, new LinearLayout.LayoutParams(-1, -2));
+            h.detail = u.text("", 12, Ui.MUTED, Ui.REG);
+            h.detail.setSingleLine(true);
+            h.detail.setEllipsize(TextUtils.TruncateAt.END);
+            LinearLayout.LayoutParams detLp = new LinearLayout.LayoutParams(-1, -2);
+            detLp.topMargin = u.dp(3);
+            col.addView(h.detail, detLp);
+            h.desc = u.text("", 11, Ui.MUTED, Ui.REG);
+            h.desc.setSingleLine(true);
+            h.desc.setEllipsize(TextUtils.TruncateAt.END);
+            LinearLayout.LayoutParams descLp = new LinearLayout.LayoutParams(-1, -2);
+            descLp.topMargin = u.dp(2);
+            col.addView(h.desc, descLp);
+            row.addView(col);
+
+            h.toggle = new Ui.Toggle(this, u);
+            h.toggle.setClickable(false);
+            h.toggle.setFocusable(false);
+            LinearLayout.LayoutParams toggleLp = new LinearLayout.LayoutParams(u.dp(52), u.dp(32));
+            toggleLp.leftMargin = u.dp(8);
+            row.addView(h.toggle, toggleLp);
+            row.setTag(h);
+        }
+
+        boolean first = pos == 0;
+        boolean last = pos == mods.size() - 1;
+        row.setBackground(u.press(u.groupBg(first ? 20 : 0, last ? 20 : 0)));
+
+        h.name.setText(e.name.isEmpty() ? e.dir : e.name);
+        h.name.setTextColor(e.enabled ? Ui.TEXT : Ui.MUTED);
+        h.detail.setText((e.enabled ? "" : "已停用 · ")
+                + "v" + (e.version.isEmpty() ? "?" : e.version)
+                + (e.author.isEmpty() ? "" : " · " + e.author)
+                + " · " + e.dir);
+        h.desc.setText(e.description);
+        h.desc.setVisibility(e.description.isEmpty() ? View.GONE : View.VISIBLE);
+        h.toggle.setChecked(e.enabled);
+        row.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                toggleMod(e);
+            }
+        });
+        row.setOnLongClickListener(new View.OnLongClickListener() {
+            @Override
+            public boolean onLongClick(View v) {
+                confirmUninstall(e);
+                return true;
+            }
+        });
+        return row;
+    }
+
+    private void refreshModules() {
+        if (modsLoading)
+            return;
+        modsLoading = true;
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                final List<Modules.ModEntry> got = Modules.list(Main.this);
+                ui.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        modsLoading = false;
+                        modsLoaded = true;
+                        mods.clear();
+                        mods.addAll(got);
+                        modRebuild();
+                        if (Modules.lastError != null)
+                            toast("读模块列表失败：" + Modules.lastError);
+                    }
+                });
+            }
+        }).start();
+    }
+
+    private void modRebuild() {
+        if (modAdapter == null)
+            return;
+        modAdapter.notifyDataSetChanged();
+        int on = 0;
+        for (Modules.ModEntry e : mods)
+            if (e.enabled)
+                on++;
+        if (modSummary != null)
+            modSummary.setText(!modsLoaded ? "正在读取模块列表…"
+                    : mods.isEmpty() ? "还没有安装任何模块"
+                    : "共 " + mods.size() + " 个 · 启用 " + on + " 个");
+        if (modEmpty != null)
+            modEmpty.setText(!modsLoaded ? "正在读取模块列表…"
+                    : "还没有安装任何模块\n点上面的按钮选一个 Magisk 格式的 zip");
+    }
+
+    /** Toggle is applied remotely first; the list refresh then shows the truth
+     *  from the device (a failed toggle leaves the switch where it was). */
+    private void toggleMod(final Modules.ModEntry e) {
+        final boolean on = !e.enabled;
+        toast((on ? "正在启用 " : "正在停用 ") + e.dir + " …");
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    Modules.setEnabled(Main.this, e.dir, on, logger);
+                    ui.post(new Runnable() {
+                        @Override
+                        public void run() {
+                            refreshModules();
+                        }
+                    });
+                } catch (final Throwable t) {
+                    logger.line("toggle " + e.dir + " failed: " + t);
+                    ui.post(new Runnable() {
+                        @Override
+                        public void run() {
+                            toast((on ? "启用" : "停用") + "失败：" + t);
+                            refreshModules();
+                        }
+                    });
+                }
+            }
+        }).start();
+    }
+
+    private void confirmUninstall(final Modules.ModEntry e) {
+        new AlertDialog.Builder(this)
+                .setTitle("卸载模块")
+                .setMessage("从 /system 摘除并删除「"
+                        + (e.name.isEmpty() ? e.dir : e.name) + "」（" + e.dir + "）？\n此操作不能撤销。")
+                .setPositiveButton("卸载", new DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(DialogInterface d, int w) {
+                        doUninstall(e);
+                    }
+                })
+                .setNegativeButton("取消", null)
+                .show();
+    }
+
+    private void doUninstall(final Modules.ModEntry e) {
+        toast("正在卸载 " + e.dir + " …");
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    Modules.uninstall(Main.this, e.dir, logger);
+                    ui.post(new Runnable() {
+                        @Override
+                        public void run() {
+                            toast("已卸载 " + e.dir);
+                            refreshModules();
+                        }
+                    });
+                } catch (final Throwable t) {
+                    logger.line("uninstall " + e.dir + " failed: " + t);
+                    ui.post(new Runnable() {
+                        @Override
+                        public void run() {
+                            toast("卸载失败：" + t);
+                            refreshModules();
+                        }
+                    });
+                }
+            }
+        }).start();
+    }
+
+    private void pickModule() {
+        Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        i.addCategory(Intent.CATEGORY_OPENABLE);
+        i.setType("*/*");
+        startActivityForResult(i, PICK_MODULE);
+    }
+
+    @Override
+    protected void onActivityResult(int req, int res, Intent data) {
+        if (req != PICK_MODULE || res != RESULT_OK || data == null || data.getData() == null) {
+            super.onActivityResult(req, res, data);
+            return;
+        }
+        final Uri uri = data.getData();
+        toast("正在安装模块…");
+        logger.line("--- 安装模块 " + uri + " ---");
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                final String name;
+                try {
+                    name = Modules.install(Main.this, uri, logger);
+                } catch (final Throwable t) {
+                    logger.line("模块安装失败: " + t);
+                    ui.post(new Runnable() {
+                        @Override
+                        public void run() {
+                            toast("安装失败：" + t.getMessage());
+                        }
+                    });
+                    return;
+                }
+                ui.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        toast("已安装 " + name + "，挂载已生效");
+                        refreshModules();
+                    }
+                });
+            }
+        }).start();
+    }
+
     /* ------------------------------------------------------------ settings */
 
     private View buildSettings() {
@@ -734,7 +1065,34 @@ public final class Main extends Activity {
         sec4.addView(settingRow(-1, "运行方式", null, "内存态", Ui.TEXT, false, null));
         sec4.addView(divider());
         sec4.addView(settingRow(-1, "适用设备", null, "Xplay6 / PD1610", Ui.TEXT, false, null));
+        sec4.addView(divider());
+        sec4.addView(settingRow(-1, "系统版本支持", null, "6.0.1 · 7.1.1 · 8.1", Ui.TEXT, false, null));
         col.addView(sec4, cardLp());
+
+        TextView support = u.text("系统版本支持列表\n"
+                + "· Android 6.0.1（内核 3.18.20）— modprobe / 用户态 helper 路线\n"
+                + "· Android 7.1.1（内核 3.18.31）— 内核内自提权路线\n"
+                + "· Android 8.1 8.19.16（内核 3.18.71）— CVE-2019-2215 内核写入路线\n"
+                + "其它内核版本一律拒绝写入，不做任何尝试。",
+                12, Ui.MUTED, Ui.REG);
+        support.setLineSpacing(u.dp(3), 1f);
+        LinearLayout.LayoutParams spLp = new LinearLayout.LayoutParams(-1, -2);
+        spLp.leftMargin = u.dp(4);
+        spLp.topMargin = u.dp(18);
+        col.addView(support, spLp);
+
+        TextView usage = u.text("使用说明\n"
+                + "1. 首页点「提权」，看到 Root 已就绪即成功；失败可稍后再点一次\n"
+                + "2. 到「应用授权」页点选要给 root 的应用，立即生效，无需保存\n"
+                + "3. 被授权的应用在其终端里执行 su 拿 root（8.1 系统拦 su 这个名字，请用 sux）\n"
+                + "4. i管家 放行本应用自启动后，重启会自动重新提权；否则每次开机手动点一次\n"
+                + "5. 一切只存在于内存：重启或关机即回到出厂状态",
+                12, Ui.MUTED, Ui.REG);
+        usage.setLineSpacing(u.dp(3), 1f);
+        LinearLayout.LayoutParams usLp = new LinearLayout.LayoutParams(-1, -2);
+        usLp.leftMargin = u.dp(4);
+        usLp.topMargin = u.dp(14);
+        col.addView(usage, usLp);
 
         TextView footer = u.text("提权只改写运行内存与 SELinux 运行表，不刷机、不写任何分区、不解 BL。\n重启后所有改动自动消失，需要重新提权。",
                 12, Ui.MUTED, Ui.REG);
@@ -924,9 +1282,9 @@ public final class Main extends Activity {
         LinearLayout bar = new LinearLayout(this);
         bar.setOrientation(LinearLayout.HORIZONTAL);
         bar.setPadding(u.dp(8), u.dp(6), u.dp(8), u.dp(6));
-        int[] glyphs = { Ui.HOME, Ui.APPS, Ui.SETTINGS };
+        int[] glyphs = navGlyphs;
         String[] labels = { "首页", "应用", "设置" };
-        for (int i = 0; i < 3; i++) {
+        for (int i = 0; i < glyphs.length; i++) {
             final int idx = i;
             LinearLayout item = new LinearLayout(this);
             item.setOrientation(LinearLayout.VERTICAL);
@@ -936,7 +1294,7 @@ public final class Main extends Activity {
             item.setOnClickListener(new View.OnClickListener() {
                 @Override
                 public void onClick(View v) {
-                    showPage(idx);
+                    showPage(navPages[idx]);
                 }
             });
             FrameLayout pill = new FrameLayout(this);
@@ -960,8 +1318,8 @@ public final class Main extends Activity {
     }
 
     private void styleNav() {
-        for (int i = 0; i < 3; i++) {
-            boolean on = i == page;
+        for (int i = 0; i < navGlyphs.length; i++) {
+            boolean on = navPages[i] == page;
             navPills[i].setBackground(u.shape(on ? 0x26D3BCFD : 0x00000000, 14));
             navIcons[i].setImageDrawable(u.glyph(navGlyphs[i], on ? Ui.PRIMARY : Ui.MUTED));
             navLabels[i].setTextColor(on ? Ui.PRIMARY : Ui.MUTED);
@@ -974,6 +1332,8 @@ public final class Main extends Activity {
         for (int i = 0; i < pages.length; i++)
             pages[i].setVisibility(i == p ? View.VISIBLE : View.GONE);
         styleNav();
+        if (p == PAGE_MODULES && !modsLoaded && !modsLoading)
+            refreshModules();
         if (p == PAGE_APPS && !appsLoaded && !loading)
             refresh();
         if (p == PAGE_HOME)

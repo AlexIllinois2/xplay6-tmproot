@@ -18,6 +18,18 @@ public final class Esc {
      *  measured shape that writes selinux_enforcing=0 (everything permissive). */
     public static native String nativeEscalate(String daemonPath, int rounds, int mapOnly);
 
+    /** Android 8.1 (3.18.71-perf-g8a8c60dd, PD1610_D_8.19.16): CVE-2019-2215 binder UAF as an
+     *  arbitrary kernel write.  Two writes -- selinux_enforcing=0 (4 bytes; 8 panics) and
+     *  modprobe_path=&lt;payload&gt; -- then one trigger that makes the kernel exec the payload as
+     *  uid 0.  The payload must be a SHELL SCRIPT: the kernel-helper domain on this ROM runs
+     *  #! scripts and dynamic /system binaries but silently loses everything a static libc ELF
+     *  does.  The function refuses unless uname(2)'s release carries the exact build tag
+     *  3.18.71-perf-g8a8c60dd (another 3.18.71 patch would move both globals; the proc file
+     *  is unreadable from the app domain on this ROM, hence uname).
+     *  rc 0 ok; -10/-11 enforcing write missed / readback still enforcing; -20/-21 modprobe write
+     *  missed / not on readback; -30 the helper never opened 12346. */
+    public static native String nativeEscalate8(String payloadPath, int rounds);
+
     /** Defeats vivo's exec-time guard on the *name* `su` with two RAM writes: a 1 GB alias
      *  into an empty pgd slot, then one instruction word through that window.  The window is
      *  proven semantically (flip selinux_enforcing and back) before any text is touched;

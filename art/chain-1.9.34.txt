@@ -1,0 +1,33 @@
+--------- beginning of main
+10-23 10:12:46.975  4775  4793 I TempRoot-boot: daemon probe :12346 failed: java.net.ConnectException: failed to connect to /127.0.0.1 (port 12346) from /127.0.0.1 (port 37480) after 1500ms: isConnected failed: ECONNREFUSED (Connection refused)
+10-23 10:12:46.976  4775  4793 I TempRoot-boot: daemon probe :12345 failed: java.net.ConnectException: failed to connect to /127.0.0.1 (port 12345) from /127.0.0.1 (port 41255) after 1500ms: isConnected failed: ECONNREFUSED (Connection refused)
+10-23 10:12:46.977  4775  4794 I TempRoot-boot: state before: rc=0 uid=10153 enforce=unreadable modprobe=
+10-23 10:12:46.978  4775  4794 I TempRoot-boot: selftest skipped on 3.18.71 (the probe belongs to the 6.0.1 primitive)
+10-23 10:12:46.979  4775  4794 I TempRoot-boot: staged /data/user/0/com.xplay6.temproot/files/sud8srv bytes=998 canExec=true
+10-23 10:12:46.981  4775  4794 I TempRoot-boot: staged /data/user/0/com.xplay6.temproot/files/sud8 bytes=272 canExec=true
+10-23 10:12:46.981  4775  4794 I TempRoot-boot: route 8 payload ready: /data/user/0/com.xplay6.temproot/files/sud8 (modprobe_path target; responder /data/user/0/com.xplay6.temproot/files/sud8srv)
+10-23 10:12:46.985  4775  4794 I TempRoot-boot: self-grant uid=10153 resealed saved=true list=[10153] why=-
+10-23 10:12:46.986  4775  4794 I TempRoot-boot: token length=32 file=/data/user/0/com.xplay6.temproot/files/su.token
+10-23 10:12:46.986  4775  4794 I TempRoot-boot: kernel 3.18.71-perf-g8a8c60dd -> route 8 (CVE-2019-2215 kernel write, shell payload)
+--------- beginning of system
+10-23 10:12:48.212  4775  4794 I TempRoot-boot: escalate8 attempt 1: rc=0 enforce try1 readv=65573 want=65573; step1 ok (enforce readback=0); modprobe try1 readv=65611 want=65611; step2 ok (readback 1); sock-trigger proto=253 type=2 rc=-1 errno=93; handler up after socket trigger; done: enforce=0(0=permissive) modprobe=ours handler=up
+10-23 10:12:48.371  4775  4794 I TempRoot-boot:   root probe [tcp+token (route8)]: uid=0(root) gid=0(root) groups=0(root) context=u:r:kernel:s0
+10-23 10:12:48.371  4775  4794 I TempRoot-boot: Permissive
+10-23 10:12:48.371  4775  4794 I TempRoot-boot: CapEff:	0000003fffffffff
+10-23 10:12:48.371  4775  4794 I TempRoot-boot: 
+10-23 10:12:48.371  4775  4794 I TempRoot-boot: @SUD_EXIT=0
+10-23 10:12:48.372  4775  4794 I TempRoot-boot: state after: rc=0 uid=10153 enforce=Permissive modprobe=/data/data/com.xplay6.temproot/files/sud8
+10-23 10:12:48.375  4775  4794 I TempRoot-boot: marked this boot as escalated, epoch=1792721242
+10-23 10:12:48.453  4775  4794 I TempRoot-boot: staged /data/user/0/com.xplay6.temproot/files/su bytes=2143768 canExec=true
+10-23 10:12:48.455  4775  4794 I TempRoot-boot: staged /data/user/0/com.xplay6.temproot/files/mirror8.sh bytes=793 canExec=true
+10-23 10:12:48.771  4775  4794 I TempRoot-boot:   mirror /sbin: MIRROR8 ok|-rwxr-xr-x 1 root root 2143768 2026-10-23 10:12 /sbin/su|-rwxr-xr-x 1 root root 2143768 2026-10-23 10:12 /sbin/sux||@SUD_EXIT=0
+10-23 10:12:48.936  4775  4794 I TempRoot-boot:   PATH witness: /sbin/sux|/sbin/su|-rwxr-xr-x 1 root root 2143768 2026-10-23 10:12 /sbin/sux||@SUD_EXIT=0
+10-23 10:12:48.936  4775  4794 I TempRoot-boot:   note: this ROM's name gate still refuses `su` to non-root callers, so granted apps must call `sux` until 8.19.16's gate site is located
+10-23 10:12:49.013  4775  4794 I TempRoot-boot: staged /data/user/0/com.xplay6.temproot/files/relayd bytes=2157032 canExec=true
+10-23 10:12:49.023  4775  4794 I TempRoot-boot: relay: started (audit trail: /storage/emulated/0/Android/data/com.xplay6.temproot/files/relayd.log)
+10-23 10:12:49.023  4775  4794 I TempRoot-boot: route 8 needs the GLOBAL permissive flip (selinux_enforcing=0); this build has no permissive_map exemption, so enforcing stays off until reboot
+10-23 10:12:49.276  4775  4794 I TempRoot-boot: adb-input witness: UNLOCK_ADB_INPUT st=already count=1 label=u:object_r:system_app_data_file:s0
+10-23 10:12:49.276  4775  4794 I TempRoot-boot: 
+10-23 10:12:49.276  4775  4794 I TempRoot-boot: @SUD_EXIT=0
+10-23 10:12:49.277  4775  4794 I TempRoot-boot: ★ 本次开机没有被 BOOT_COMPLETED 唤醒（vivo 自启动未放行）——重启后要手点一次「提权」；i管家→权限管理→自启动 打开本应用即可，卸载重装后这个开关会回到关闭
+10-23 10:12:49.295  4775  4794 I TempRoot-boot: job schedule rc=1 latency=600000

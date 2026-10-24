@@ -45,7 +45,7 @@ final class Ui {
     /* Glyph kinds. */
     static final int HOME = 0, APPS = 1, SETTINGS = 2, SHIELD = 3, CHEVRON = 4,
             BACK = 5, LOG = 6, TRASH = 7, TERMINAL = 8, AUDIO = 9, INFO = 10,
-            SEARCH = 11, CHECK = 12;
+            SEARCH = 11, CHECK = 12, MOD = 13;
 
     private final Context ctx;
     private final float density;
@@ -274,6 +274,13 @@ final class Ui {
                     p.lineTo(10f, 17.2f);
                     p.lineTo(18.8f, 7.4f);
                     c.drawPath(p, stroke);
+                    break;
+                case MOD:
+                    /* Stacked module cards: the back card peeks out behind the front one. */
+                    c.drawRoundRect(7.0f, 3.8f, 20.2f, 11.4f, 2.4f, 2.4f, stroke);
+                    c.drawRoundRect(3.8f, 8.2f, 17.0f, 20.2f, 2.4f, 2.4f, stroke);
+                    c.drawLine(3.8f, 12.2f, 17.0f, 12.2f, stroke);
+                    c.drawLine(6.2f, 16.2f, 9.6f, 16.2f, stroke);
                     break;
                 default:
                     break;

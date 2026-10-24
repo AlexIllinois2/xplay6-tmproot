@@ -38,9 +38,12 @@ else
 	echo "  ebitmap chain+walk arms: ok"
 fi
 
-echo "[1/6] native libesc.so (clobber.c + jni_esc.c)"
+echo "[1/6] native libesc.so (clobber.c + esc8.c + jni_esc.c)"
+# esc8.c is route 8 (Android 8.1 / 3.18.71): CVE-2019-2215 as a kernel write.  It ships inside
+# the .so because the app process must not exec a static ELF from its data dir before SELinux is
+# off -- and on this ROM the kernel helper cannot run one anyway.
 "$CL" -target aarch64-linux-android21 -fPIC -shared -O2 -DESC_LIB \
-	-o "$S/lib/arm64-v8a/libesc.so" "$ROOT/clobber.c" "$A/jni/jni_esc.c"
+	-o "$S/lib/arm64-v8a/libesc.so" "$ROOT/clobber.c" "$ROOT/esc8.c" "$A/jni/jni_esc.c"
 
 echo "[2/6] bundle the daemon the kernel will exec, plus the su client"
 # A freshly unpacked source tree holds no binaries.  build_all.sh is the single entry

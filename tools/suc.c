@@ -303,15 +303,20 @@ int main(int argc, char **argv)
     snprintf(req, sizeof req, interactive && !cmd ? "SU %d -\n" : "SU %d %s\n",
              uid, cmd ? cmd : "");
 
-    /* peer first (kernel-backed identity).  peer_channel() sends the request
-     * itself, together with SCM_CREDENTIALS, so it must not be sent twice. */
+    /* @sud first: when the manager's relay is up (route 7 and route 8 both run it) the
+     * connection is immediate.  Peer hand-off is only for a route where the daemon itself
+     * cannot bind a stream listener -- there the connect fails at once and we fall back
+     * below.  This order matters because the peer wait used to run for its full timeout on
+     * every call even when @sud was answering (measured 2026-10-23: 8 s per su, which is
+     * what pushed Snub's foreground services past their 5 s startForeground deadline). */
     int req_sent = 0;
 
-    fd = peer_channel(req, 8000);
-    if (fd >= 0)
-        req_sent = 1;
-    else
-        fd = open_channel();
+    fd = open_channel();
+    if (fd < 0) {
+        fd = peer_channel(req, 1500);
+        if (fd >= 0)
+            req_sent = 1;
+    }
     if (fd < 0)
         return 127;
     if (!req_sent && write(fd, req, strlen(req)) < 0) {

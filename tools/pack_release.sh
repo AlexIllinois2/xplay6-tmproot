@@ -33,10 +33,19 @@ find tools -maxdepth 1 -type f \( -name '*.c' -o -name '*.h' -o -name '*.S' -o -
   echo tools/apk/debug.keystore
   echo tools/apk/jni/jni_esc.c
   find tools/apk/src -name '*.java'
+  # 模块引擎随 APK 打进 assets（modmount/modcust/modlist/modboot），它们也是源码，
+  # 归档里没有就等于只给了编译产物、没给可改的源。
+  find tools/apk/assets -maxdepth 1 -type f -name '*.sh' >> "$LIST"
   echo tools/apk/demo/AndroidManifest.xml
   echo tools/apk/demo/build.sh
   find tools/apk/demo/src -name '*.java'
 } >> "$LIST"
+# route 8（8.1 / 3.18.71）的内核写原语源码与实测说明：APK 里是 esc8.c，这里补齐
+# 同一路线的实验源码（w2215 等），否则换机重打时只剩结论、没有过程。
+find exp8 -maxdepth 1 -type f \( -name '*.c' -o -name '*.s' -o -name '*.md' \) >> "$LIST"
+# 8.1 内核的构建配置与符号表（地址推导的原始依据；Image 太大不入包）
+echo ota8/config.txt >> "$LIST"
+echo ota8/syms8.txt >> "$LIST"
 # evidence the release claim rests on
 {
   # ledgers and procedure docs are DERIVED from disk, not remembered: the hand-written list stopped at
@@ -78,7 +87,7 @@ sed -i "1i # 在此目录内校验：sha256sum -c SHA256SUMS.txt（这两行是�
   echo "# INTEGRITY -- v$V 归档包的逐字节对账"
   echo "# A) 包内关键件（下面这些无 # 前缀的行就是校验行，\`sha256sum -c\` 直接吃本文件）："
   sha256sum "$APK"
-  sha256sum tools/clobber.c tools/esc.h tools/copy_atomic.h tools/borrow_verdict.h \
+  sha256sum tools/clobber.c tools/esc8.c tools/esc.h tools/copy_atomic.h tools/borrow_verdict.h \
             tools/hp_gain7.py tools/pgdalias.py tools/gate_constants.py \
             tools/verify_approot.sh tools/rehearse_sugate.sh tools/port_check.sh tools/build_all.sh \
             tools/apk/jni/jni_esc.c tools/apk/build.sh \
@@ -87,7 +96,11 @@ sed -i "1i # 在此目录内校验：sha256sum -c SHA256SUMS.txt（这两行是�
             tools/apk/src/com/xplay6/temproot/BootJob.java \
             tools/apk/src/com/xplay6/temproot/Main.java \
             tools/apk/src/com/xplay6/temproot/EscService.java \
+            tools/apk/src/com/xplay6/temproot/Modules.java \
+            tools/apk/assets/modmount.sh tools/apk/assets/modcust.sh \
+            tools/apk/assets/modlist.sh tools/apk/assets/modboot.sh \
             tools/sud.c tools/relayd.c tools/broot7.c tools/suc.c tools/sumount.c tools/nsmbind.c \
+            exp8/w2215.c exp8/kgsl-plan.md ota8/config.txt ota8/syms8.txt \
             art/kallsyms-7-real.txt art/kallsyms_real.txt art/chain-1.9.19-boot.txt
   echo
   echo "# B) 不在包里（机主选择瘦包）。这两枚是 tools/pgdalias.py 与构建入口那道闸的权威依据；自己从同 ROM 的"

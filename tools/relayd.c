@@ -96,37 +96,47 @@ static int allowed(uid_t uid)
 	return 0;
 }
 
+/* Relay both directions until BOTH sides are done.  A client that closes its write side
+ * immediately -- suc does exactly that: interactive `su` writes the command, gets EOF on
+ * stdin and shuts the socket down -- must still receive everything the responder prints;
+ * tearing down on the first EOF (what this did until 2026-10-23) closed the upstream socket
+ * before the shell had even run, so every app-side root call came back empty with exit 0. */
 static void copy_both(int a, int b)
 {
 	fd_set r;
 	int n, hi = a > b ? a : b;
+	int a_open = 1, b_open = 1;
 
-	for (;;) {
+	while (a_open || b_open) {
 		FD_ZERO(&r);
-		FD_SET(a, &r);
-		FD_SET(b, &r);
+		if (a_open)
+			FD_SET(a, &r);
+		if (b_open)
+			FD_SET(b, &r);
 		n = select(hi + 1, &r, NULL, NULL, NULL);
 		if (n < 0) {
 			if (errno == EINTR)
 				continue;
 			return;
 		}
-		if (FD_ISSET(a, &r)) {
+		if (a_open && FD_ISSET(a, &r)) {
 			char buf[4096];
 			ssize_t k = read(a, buf, sizeof buf);
 
-			if (k <= 0)
-				return;
-			if (write_all(b, buf, (size_t) k) < 0)
+			if (k <= 0) {
+				a_open = 0;
+				shutdown(b, SHUT_WR);
+			} else if (write_all(b, buf, (size_t) k) < 0)
 				return;
 		}
-		if (FD_ISSET(b, &r)) {
+		if (b_open && FD_ISSET(b, &r)) {
 			char buf[4096];
 			ssize_t k = read(b, buf, sizeof buf);
 
-			if (k <= 0)
-				return;
-			if (write_all(a, buf, (size_t) k) < 0)
+			if (k <= 0) {
+				b_open = 0;
+				shutdown(a, SHUT_WR);
+			} else if (write_all(a, buf, (size_t) k) < 0)
 				return;
 		}
 	}
@@ -136,10 +146,12 @@ static void copy_both(int a, int b)
 static void serve_one(int c)
 {
 	struct ucred uc;
-	char req[2048], out[2100];
+	char req[2048], rest[2048], out[2100];
 	socklen_t l = sizeof uc;
  gid_t grp[32];
 	int n, sfd = -1, tok = 0;
+	size_t got = 0, restlen = 0;
+	int nl = -1;
 	FILE *tf;
 
 	if (getsockopt(c, SOL_SOCKET, SO_PEERCRED, &uc, &l) < 0) {
@@ -157,11 +169,37 @@ static void serve_one(int c)
 		if (uc.uid != 0 && uc.uid < APP_UID_MIN)
 			logf("relayd: note: caller uid=%d is not an app uid\n", (int) uc.uid);
 	}
-	if (read(c, req, sizeof req - 1) <= 0) {
+	/* Read the request LINE and keep whatever follows it.  An interactive `su` (Snub's HShell
+	 * writes its command, then closes stdin) sends "SU 0 -" and the first command in one TCP
+	 * segment.  Truncating at the newline -- what this did until 2026-10-23 -- threw those
+	 * bytes away, so the shell the responder exec'd got no input: every root call from an app
+	 * returned empty output with exit code 0. */
+	while (got < sizeof req - 1) {
+		char *p;
+		ssize_t k = read(c, req + got, sizeof req - 1 - got);
+
+		if (k <= 0)
+			break;
+		p = memchr(req + got, '\n', (size_t) k);
+		got += (size_t) k;
+		if (p) {
+			nl = (int) (p - req);
+			break;
+		}
+	}
+	if (got == 0) {
 		close(c);
 		return;
 	}
-	req[strcspn(req, "\r\n")] = 0;
+	if (nl < 0) {
+		nl = (int) strcspn(req, "\r\n");
+	} else {
+		restlen = got - (size_t) nl - 1;
+		memcpy(rest, req + nl + 1, restlen);
+	}
+	req[nl] = 0;
+	if (nl > 0 && req[nl - 1] == '\r')
+		req[nl - 1] = 0;
 	if (!allowed(uc.uid)) {
 		/* same bytes the daemon sends for an unknown service: an unlisted app learns nothing */
 		logf("relayd: deny uid=%d cmd=%.160s\n", (int) uc.uid, req);
@@ -223,7 +261,8 @@ static void serve_one(int c)
 		tok = snprintf(out, sizeof out, "%s\n", req);
 		logf("relayd: note: no token at %s, forwarding unauthenticated\n", g_token);
 	}
-	if (write_all(sfd, out, (size_t) tok) < 0) {
+	if (write_all(sfd, out, (size_t) tok) < 0 ||
+	    (restlen && write_all(sfd, rest, restlen) < 0)) {
 		close(sfd);
 		close(c);
 		return;
