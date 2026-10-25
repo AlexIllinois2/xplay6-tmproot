@@ -552,8 +552,11 @@ int esc_write(unsigned long addr, const void *buf, size_t blen, int rounds)
 {
 	WQI = 4;
 	SAFEFED = 0;
-	if (!kp_select())
-		return -1;
+	/* No profile gate here.  run_rounds() writes exactly the address it is given, and the
+	 * only callers that need kp's constants are route 6's esc_escalate_ex()/esc_sugate(),
+	 * which check kp themselves.  Gating every write on kp_select() killed route 7 on
+	 * 3.18.31 (7.12.15): broot7 carries its own C7_* addresses, kp-select knows only the two
+	 * 6.0.1 releases, so the ladder's very first write answered "die" (1.9.39 measured). */
 	printf("  esc_write: @%#lx %zu B rounds=%d (WQI=%d SAFEFED=%d)\n", addr, blen, rounds, WQI, SAFEFED);
 	fflush(stdout);
 	return run_rounds(addr, buf, blen, rounds, 0);
