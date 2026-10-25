@@ -1010,7 +1010,7 @@ public final class Main extends Activity {
 
         addSection(col, "音频");
         LinearLayout sec2 = newCard();
-        gainRow601 = settingRow(-1, "跟随 6.0.1", "把输出增益切成 6.0.1 那一档",
+        gainRow601 = settingRow(-1, "跟随 1.15.1", "把输出增益切成 1.15.1 那一档",
                 null, Ui.TEXT, false, new Runnable() {
                     @Override
                     public void run() {
@@ -1066,14 +1066,14 @@ public final class Main extends Activity {
         sec4.addView(divider());
         sec4.addView(settingRow(-1, "适用设备", null, "Xplay6 / PD1610", Ui.TEXT, false, null));
         sec4.addView(divider());
-        sec4.addView(settingRow(-1, "系统版本支持", null, "6.0.1 · 7.1.1 · 8.1", Ui.TEXT, false, null));
+        sec4.addView(settingRow(-1, "系统版本支持", null, "1.15.1 · 7.12.15 · 8.19.16", Ui.TEXT, false, null));
         col.addView(sec4, cardLp());
 
         TextView support = u.text("系统版本支持列表\n"
-                + "· Android 6.0.1（内核 3.18.20）— modprobe / 用户态 helper 路线\n"
-                + "· Android 7.1.1（内核 3.18.31）— 内核内自提权路线\n"
-                + "· Android 8.1 8.19.16（内核 3.18.71）— CVE-2019-2215 内核写入路线\n"
-                + "其它内核版本一律拒绝写入，不做任何尝试。",
+                + "· 1.15.1（Android 6.0.1 / 内核 3.18.20）— modprobe / 用户态 helper 路线\n"
+                + "· 7.12.15（Android 7.1.1 / 内核 3.18.31）— 内核内自提权路线\n"
+                + "· 8.19.16（Android 8.1 / 内核 3.18.71）— CVE-2019-2215 内核写入路线\n"
+                + "只认这三个固件版本；其它厂商版本或内核一律拒绝写入，不做任何尝试。",
                 12, Ui.MUTED, Ui.REG);
         support.setLineSpacing(u.dp(3), 1f);
         LinearLayout.LayoutParams spLp = new LinearLayout.LayoutParams(-1, -2);
@@ -1199,7 +1199,7 @@ public final class Main extends Activity {
         gainCheckStock.setVisibility(b ? View.VISIBLE : View.INVISIBLE);
         gainRow601.setBackground(u.press(u.shape(a ? 0x1FD3BCFD : 0x00000000, 0)));
         gainRowStock.setBackground(u.press(u.shape(b ? 0x1FD3BCFD : 0x00000000, 0)));
-        gainNote.setText(a ? "耳机增益：请求 6.0.1 那档（RAM 读不回是设计如此），重启后由开机链再写"
+        gainNote.setText(a ? "耳机增益：请求 1.15.1 那档（RAM 读不回是设计如此），重启后由开机链再写"
                 : b ? "耳机增益：请求本机 DT 那档"
                 : "耳机增益：未改（7 自己的 DT 值）");
     }
@@ -1208,10 +1208,10 @@ public final class Main extends Activity {
         new Thread(new Runnable() {
             @Override
             public void run() {
-                String out = Chain.hpGain(arm);
+                String out = Chain.hpGain(Main.this, arm, logger);
                 if (Chain.hpGainLanded(out)) {
                     final boolean kept = Chain.saveGainChoice(Main.this, arm);
-                    logger.line("耳机增益 " + arm + "：已写入（RAM 读不回是设计如此）·"
+                    logger.line("耳机增益 " + ("601".equals(arm) ? "1.15.1" : "本机") + "：已写入（RAM 读不回是设计如此）·"
                             + (kept ? "重启后开机链会再写一次" : "选择没能存下（saved=false），重启后不会自动回来")
                             + "·要暂停→播放或切一首才吃到");
                     ui.post(new Runnable() {
@@ -1222,7 +1222,8 @@ public final class Main extends Activity {
                         }
                     });
                 } else {
-                    logger.line("耳机增益 " + arm + "：没打到 -> " + (out == null ? "null" : out));
+                    logger.line("耳机增益 " + ("601".equals(arm) ? "1.15.1" : "本机") + "：没打到 -> "
+                            + (out == null ? "null" : out));
                     toast("耳机增益没打到，详见运行日志");
                 }
             }

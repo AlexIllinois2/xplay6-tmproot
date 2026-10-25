@@ -76,6 +76,9 @@ cp "$ROOT/sumount" "$A/assets/sumount"
 # the 7.1.1 escalation: one self-contained binary (needle + in-process writes/reads + permissive_map
 # + in-place cred patch + detached daemon exec).  Route selection lives in Chain.java.
 cp "$ROOT/broot7" "$A/assets/broot7"
+# the headphone-gain writer: `clobber 40 hpgain <arm> ...` runs from /data/local/tmp, which a full
+# flash wipes -- previously this binary was only ever an adb push, so the in-app arm had nothing to run
+cp "$ROOT/clobber" "$A/assets/clobber"
 cp "$ROOT/nsmbind" "$A/assets/nsmbind"
 cp "$ROOT/relayd" "$A/assets/relayd"
 

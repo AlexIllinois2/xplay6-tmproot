@@ -1056,12 +1056,56 @@ public final class Chain {
         return su(0, cmd);
     }
 
+    /** Put the clobber CLI where the root channel can read it.  It has to live on our EXTERNAL files
+     *  dir, not the private one: the channel runs commands under `runcon u:r:shell:s0`, and shell is
+     *  denied /data/data/<pkg> (0700 + app_data_file) while it can read /sdcard/Android/data/<pkg>
+     *  (the same reason adb shell can read broot7.log there).  /sdcard is noexec, so the caller still
+     *  copies it to /data/local/tmp before running it.  A full flash wipes /data/local/tmp and this
+     *  asset used to be an adb push only, which is why the in-app arm had nothing to run on 7.12.15. */
+    static File stageClobber(Context ctx, Log log) {
+        java.io.File ext = ctx.getExternalFilesDir(null);
+        java.io.File dst = new java.io.File(ext != null ? ext : ctx.getFilesDir(), "clobber");
+        java.io.File tmp = new java.io.File(dst.getParentFile(), "clobber.new." + System.currentTimeMillis());
+        try {
+            java.io.InputStream in = ctx.getAssets().open("clobber");
+            java.io.OutputStream out = new java.io.FileOutputStream(tmp);
+            byte[] buf = new byte[64 * 1024];
+            int n, total = 0;
+            while ((n = in.read(buf)) > 0) {
+                out.write(buf, 0, n);
+                total += n;
+            }
+            out.close();
+            in.close();
+            if (!tmp.renameTo(dst))
+                dst = tmp;
+            dst.setReadable(true, false);
+            log.line("hpgain: clobber 就位 " + dst.getAbsolutePath() + " bytes=" + total
+                    + " ext=" + (ext != null));
+            return dst;
+        } catch (Throwable t) {
+            log.line("hpgain: clobber 资产落地失败: " + t);
+            return null;
+        }
+    }
+
     /** The headphone-gain arm (ledger 592/686): have `clobber` write the named 4-byte value into
      *  `wcd_hph_gain`, the one column of which the two firmware lines differ (33 ohm -> column 1).
      *  No kernel address is spelled in Java: clobber carries it as a gated constant that
      *  tools/gate_constants.py re-derives from the recovered kallsyms, and the binary itself refuses
-     *  unless /proc/sys/kernel/osrelease matches the build that reading belongs to. */
-    public static String hpGain(String arm) {
+     *  unless /proc/sys/kernel/osrelease matches the build that reading belongs to.
+     *  arm "601" is the 6.0.1 line (kernel 3.18.20-perf-gb6998a3 = 1.15.1, whose compiled array is
+     *  {4,1,1,1}); "stock" is 7's own DT value {4,3,1,1}. */
+    public static String hpGain(Context ctx, String arm, Log log) {
+        File c = stageClobber(ctx, log);
+        if (c == null)
+            return "clobber asset missing";
+        String put = root("cp '" + c.getAbsolutePath() + "' /data/local/tmp/.clobber.new"
+                + " && chmod 0755 /data/local/tmp/.clobber.new"
+                + " && mv -f /data/local/tmp/.clobber.new /data/local/tmp/clobber"
+                + " || echo CLOBBER_COPY_FAIL");
+        if (put != null && put.indexOf("CLOBBER_COPY_FAIL") >= 0)
+            log.line("hpgain " + arm + ": clobber 投放失败 -> " + put.replace('\n', ' ').trim());
         /* WQI/SAFEFED are spelled out even though the binary defaults to the same pair: the first
          * boot apply came back `bad WQI=0` because this transport appends an empty argument, and an
          * argument the caller controls is one less thing the transport can eat (ledger 687). */
@@ -1110,7 +1154,7 @@ public final class Chain {
             log.line("hpgain: 没存过选择 -> 保持 7 自己的 DT 值（未写任何东西）");
             return;
         }
-        String out = hpGain(arm);
+        String out = hpGain(ctx, arm, log);
         if (hpGainLanded(out))
             log.line("hpgain " + arm + ": FIRED（读不回是设计如此・生效要等下一次耳机路使能）");
         else {

@@ -1,8 +1,0 @@
-  ok   already-borrowed: uid=0 sb=0 with cred readback == init_cred is a TAKE
-  ok   teeth: the shipped predicate calls that same reading a failure (this is the bug)
-  ok   fresh borrow: uid 10151->0 and cred readback == init_cred is a TAKE
-  ok   no-take: readback still the own cred is NOT a take
-  ok   aux-only: with no readback, uid==0 is reported as AUX not TAKE
-  ok   refuse: no readback and uid!=0 is NOT a take
-  ok   securebits 0 (init_cred's real value) does not veto a pointer-confirmed take
-borrow_verdict: 0 arm(s) failed

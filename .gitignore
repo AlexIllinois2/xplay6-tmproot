@@ -1,0 +1,57 @@
+# ---------------------------------------------------------------------------
+# 构建产物：全部可由 tools/build_all.sh / tools/apk/build.sh 重新生成，不入库
+# ---------------------------------------------------------------------------
+
+# APK 打包中间目录与最终包（release/ 下已发布的包仍保留）
+tools/apk/stage/
+tools/temproot.apk
+tools/apk/demo/*.apk
+
+# build.sh 从 tools/ 复制进 assets 的二进制副本（源码不在这里）
+tools/apk/assets/broot7
+tools/apk/assets/clobber
+tools/apk/assets/nsmbind
+tools/apk/assets/relayd
+tools/apk/assets/su
+tools/apk/assets/sud
+tools/apk/assets/sumount
+
+# tools/build_all.sh 与各专项脚本编译出的静态二进制
+tools/broot
+tools/broot7
+tools/sud
+tools/suc
+tools/sumount
+tools/swap
+tools/calread
+tools/calget
+tools/clobber
+tools/sugate_probe
+tools/elflush
+tools/sgt_pay
+tools/icache_sync
+tools/nsmbind
+tools/rootsh
+tools/socktrig
+tools/kmodmark
+tools/relayd
+tools/umhraw
+tools/libesc.so
+
+# 主机侧自测程序与运行输出
+tools/grants_rule_test
+tools/copy_atomic_test
+tools/borrow_verdict_test
+tools/*.o
+tools/*.out
+tools/*.log
+
+# ---------------------------------------------------------------------------
+# 本机 / 临时文件
+# ---------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+.DS_Store
+Thumbs.db
+*.swp
+*~
