@@ -1,0 +1,16 @@
+  ok   arm: with 0 of 20 reported, the gate refuses (announced 0/18 criteria reported (mode=main))
+  ok   arm: with all 20 reported, the gate accepts
+  ok   arm: G stays out of the main denominator (mode=main)
+PASS  TSTORDER  arm: step note does not eat a real uid=0 reading   [out=uid=0(root) err=su: cannot publish request name: Permission denied]
+  ok   arm: verdict is matched before the blind-spot note (ledger 631: the note rides along on SUCCESS too)
+REFUSED  TSTNEG  arm: harness blind spot   -- no ruler: [out= err=su: cannot publish request name: Permission denied]
+  ok   arm: a cannot-publish-request-name reading is REFUSED -- neither pass nor fail
+FAIL  TSTPOS  arm: real refusal still scores   got [ERR unknown service] want /uid=0/
+  ok   arm: an ordinary denial still FAILs (the refuse path did not eat it)
+REFUSED  TSTPOS2  arm: the truncated-proof sentinel is refused   -- no ruler: [NORULER: proof log is 0 bytes fresh=1]
+  ok   arm: an empty proof log is REFUSED, not scored as no-root
+PASS  TSTM0  arm: both binder answers present   [YES YES]
+FAIL  TSTM1  arm: reply direction mediated -> fail   got [NO NO] want /^YES YES$/   channel side: relayd=[] @sud-rows=?
+REFUSED  TSTM2  arm: silent root channel -> refuse   -- no ruler: [NORULER: root channel answered nothing for service check NO]
+  ok   arm: M scores green / red / refused in the three distinct states
+selftest: coverage gate has teeth; 20 criteria declared

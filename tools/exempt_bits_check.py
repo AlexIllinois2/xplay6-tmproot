@@ -100,7 +100,7 @@ def c_bytes(exe, bits, base):
 
 
 def py_bytes(bits, base):
-    r = subprocess.run([sys.executable, os.path.join(ROOT, "tools", "permmap7.py"), "build",
+    r = subprocess.run(["python3", os.path.join(ROOT, "tools", "permmap7.py"), "build",
                         "--bits", ",".join(str(x) for x in sorted(bits)),
                         "--base", hex(base)], capture_output=True, text=True)
     if r.returncode != 0:
@@ -154,6 +154,51 @@ def check(verbose=True):
         bad.append("the SHIPPED C builder and permmap7.py disagree on the exemption bytes "
                     "(C nodes=%d python=%d, head %s vs %s) -- the device reading does not certify what "
                     "broot7 will write" % (len(cn), len(pn), ch, ph))
+    # ---- the 1.17.12 route-6 arm -----------------------------------------------------
+    # clobber.c carries its own exemption set for the 1.17.12 profile (esc_exempt_1712) and its own
+    # node host (MODPROBE_ADDR_1712 + 0x48, the tail of that build's modprobe_path[]).  Same rule as
+    # above: the numbers must be the live policy's answer, and the builder must accept the geometry.
+    TSV_1712 = os.path.join(ROOT, "art", "policy-types-1712-live.tsv")
+    src = open(os.path.join(ROOT, "tools", "clobber.c"), encoding="utf-8", errors="replace").read()
+    m = re.search(r"esc_exempt_1712\[\]\s*=\s*\{([0-9, ]+)\}", src)
+    if not m:
+        raise SystemExit("tools/clobber.c: no esc_exempt_1712[] -- the 1.17.12 arm lost its list")
+    got_1712 = sorted(int(x) for x in re.findall(r"\d+", m.group(1)))
+    t2 = {}
+    if not os.path.exists(TSV_1712):
+        raise SystemExit("no %s -- dump the loaded policy and run tools/gen_policy_tsv.py" % TSV_1712)
+    for line in open(TSV_1712, errors="ignore"):
+        mm = re.match(r"^(\d+)\t(\S+)\s*$", line)
+        if mm:
+            t2.setdefault(mm.group(2), int(mm.group(1)))
+    NAMES_1712 = ["kernel", "qti_init_shell", "init", "untrusted_app"]
+    want_1712 = []
+    for n in NAMES_1712:
+        if n not in t2:
+            raise SystemExit("%s is not in the 1.17.12 policy -- the required list names a type this "
+                             "firmware does not have" % n)
+        want_1712.append(t2[n])
+    want_1712.sort()
+    if got_1712 != want_1712:
+        names2 = {v: k for k, v in t2.items()}
+        bad.append("clobber.c esc_exempt_1712: %s (policy says %s; missing=%s extra=%s)" % (
+            got_1712, want_1712,
+            ",".join(sorted(names2[v] for v in set(want_1712) - set(got_1712))) or "-",
+            ",".join(sorted(names2[v] for v in set(got_1712) - set(want_1712))) or "-"))
+    else:
+        m2 = re.search(r"^#define\s+MODPROBE_ADDR_1712\s+(0x[0-9a-fA-F]+)", src, re.M)
+        if not m2:
+            raise SystemExit("tools/clobber.c: no MODPROBE_ADDR_1712 -- the 1712 node host is unknown")
+        base2 = int(m2.group(1), 16) + 0x48
+        nw2, out2 = node_capacity(want_1712, base2)
+        if nw2 is None:
+            raise SystemExit("permmap7.py cannot build the 1712 bit set:\n%s" % out2)
+        if nw2 > 4:
+            bad.append("1712 bit set needs %d nodes at %#x, the host holds 4" % (nw2, base2))
+        if verbose:
+            print("1712 arm:   esc_exempt_1712 == policy (%s), %d node(s) at %#x"
+                  % (",".join(str(v) for v in want_1712), nw2, base2))
+
     if verbose:
         names = {v: k for k, v in t.items()}
         print("authority: %s (%d types)" % (os.path.relpath(TSV, ROOT), len(t)))

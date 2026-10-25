@@ -1,0 +1,17 @@
+copy: /tmp/copytest-absent-836925 is not a regular non-empty file
+copy: /tmp/copytest-empty-836925 is not a regular non-empty file
+copy: /tmp/copytest-empty-836925 is not a regular non-empty file
+copy: open /tmp/copytest-src-836925.parent-missing/deep.new836925: errno=2
+copy: /tmp/copytest-empty-836925 is not a regular non-empty file
+copy: /tmp/copytest-adir-836925 is not a regular non-empty file
+  ok   deliver: full client lands, right size
+  ok   deliver: mode is 0755 (not the daemon's 077 umask)
+  ok   guard: unreadable source leaves the previous client intact
+  ok   teeth: the pre-fix helper really does truncate it (arm would catch the bug)
+  ok   guard: a zero-length client is refused, not published
+  ok   cleanup: a refused delivery leaves no .new<pid> litter
+  ok   refuse: missing parent directory fails cleanly, damaged flag not asserted
+  ok   in-place: verified rewrite lands the full 8192 bytes
+  ok   in-place: a bad source is refused BEFORE the destination is truncated
+  ok   refuse: a directory is never delivered as the client
+copy_atomic: 0 arm(s) failed

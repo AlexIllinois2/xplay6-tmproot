@@ -1,0 +1,62 @@
+daemon private dir : /data/local/tmp/.sud
+client drop dir    : /data/local/tmp/.sud/req
+  client tools/apk/jni/jni_esc.c      -> /data/local/tmp/.sud/req OK
+  client tools/suc.c                  -> /data/local/tmp/.sud/req OK
+  mode  chmod      REQDIR     1777
+  mode  chmod      SESSDIR    700
+  mode  chmod      SOCKDIR2   711
+  mode  open       SU_LOG     600
+# checked 3 file(s), 4 daemon symbols, 2 client constants, 4 mode rules
+daemon private dir : /data/local/tmp/.sud
+client drop dir    : /data/local/tmp/.sud/req
+  client tools/apk/jni/jni_esc.c      -> /data/local/tmp/.sud MISMATCH
+  client tools/suc.c                  -> /data/local/tmp/.sud/req OK
+  mode  chmod      REQDIR     1777
+  mode  chmod      SESSDIR    700
+  mode  chmod      SOCKDIR2   711
+  mode  open       SU_LOG     600
+# checked 3 file(s), 4 daemon symbols, 2 client constants, 4 mode rules
+  ok   arm: a client pointing at the old drop dir is reported (1)
+  note  arm 2 (missing symbols -> refuse) is exercised inline below, not by env
+  ok   arm: an unparseable daemon is refused (gate: tools/sud.c does not define SOCKDIR2,REQDIR,SU_LOG,SES)
+daemon private dir : /data/local/tmp/.sud
+client drop dir    : /data/local/tmp/.sud/req
+  client tools/apk/jni/jni_esc.c      -> /data/local/tmp/.sud/req OK
+  client tools/suc.c                  -> /data/local/tmp/.sud/req OK
+  mode  chmod      REQDIR     1777
+  mode  chmod      SESSDIR    700
+  mode  chmod      SOCKDIR2   777
+  mode  open       SU_LOG     600
+# checked 3 file(s), 4 daemon symbols, 2 client constants, 4 mode rules
+  ok   arm: chmod(SOCKDIR2)=0777 is reported (chmod(SOCKDIR2) mode 777 violates the permission shape: the daemon's p)
+daemon private dir : /data/local/tmp/.sud
+client drop dir    : /data/local/tmp/.sud/req
+  client tools/apk/jni/jni_esc.c      -> /data/local/tmp/.sud/req OK
+  client tools/suc.c                  -> /data/local/tmp/.sud/req OK
+  mode  chmod      REQDIR     777
+  mode  chmod      SESSDIR    700
+  mode  chmod      SOCKDIR2   711
+  mode  open       SU_LOG     600
+# checked 3 file(s), 4 daemon symbols, 2 client constants, 4 mode rules
+  ok   arm: chmod(REQDIR)=0777 is reported (chmod(REQDIR) mode 777 violates the permission shape: the client drop )
+daemon private dir : /data/local/tmp/.sud
+client drop dir    : /data/local/tmp/.sud/req
+  client tools/apk/jni/jni_esc.c      -> /data/local/tmp/.sud/req OK
+  client tools/suc.c                  -> /data/local/tmp/.sud/req OK
+  mode  chmod      REQDIR     1777
+  mode  chmod      SESSDIR    777
+  mode  chmod      SOCKDIR2   711
+  mode  open       SU_LOG     600
+# checked 3 file(s), 4 daemon symbols, 2 client constants, 4 mode rules
+  ok   arm: chmod(SESSDIR)=0777 is reported (chmod(SESSDIR) mode 777 violates the permission shape: the session dir)
+daemon private dir : /data/local/tmp/.sud
+client drop dir    : /data/local/tmp/.sud/req
+  client tools/apk/jni/jni_esc.c      -> /data/local/tmp/.sud/req OK
+  client tools/suc.c                  -> /data/local/tmp/.sud/req OK
+  mode  chmod      REQDIR     1777
+  mode  chmod      SESSDIR    700
+  mode  chmod      SOCKDIR2   711
+  mode  open       SU_LOG     644
+# checked 3 file(s), 4 daemon symbols, 2 client constants, 4 mode rules
+  ok   arm: open(SU_LOG)=0644 is reported (open(SU_LOG) mode 644 violates the permission shape: the audit log mus)
+sud_layout selftest: 6/6 arms passed

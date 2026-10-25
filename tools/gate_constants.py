@@ -34,7 +34,17 @@ MAP = {
         ("GATE_PRIMARY_VA", "SUGATE_GATE_VA", "va"),
         ("GATE_ORIG_HEX", "SUGATE_GATE_ORIG", "word"),
         ("GATE_PATCH_HEX", "SUGATE_GATE_PATCH", "word"),
-        ("WITNESS_PRIMARY", "ENFORCE_ADDR", "va"),
+        ("WITNESS_PRIMARY", "ENFORCE_ADDR_601", "va"),
+    ],
+    "6.0.1-1712": [
+        # authority = derive_1712(): independent recomputation from fw/1712/Image and
+        # art/kallsyms-1712-real.txt (modprobe by its unique literal, selinux_enforcing by
+        # enforcing_setup's adrp+str, permissive_map by policydb out of security_load_policy's
+        # adrp+add xref).  The name-gate (SUGATE_*) arm is 1.15.1-only and refuses at runtime
+        # on this profile, so it is deliberately absent from this list.
+        ("MODPROBE_1712", "MODPROBE_ADDR_1712", "va"),
+        ("ENFORCE_1712", "ENFORCE_ADDR_1712", "va"),
+        ("PERM_MAP_1712", "PERM_MAP_ADDR_1712", "va"),
     ],
     "7": [
         ("ALIAS_ENTRY_VA", "SUGATE7_PGD_ENTRY", "va"),
@@ -63,7 +73,7 @@ KALL = {
 
 def derive(profile):
     """pgdalias' own answer for this profile, or SystemExit -- never a partial set."""
-    r = subprocess.run([sys.executable, os.path.join(T, "pgdalias.py"),
+    r = subprocess.run(["python3", os.path.join(T, "pgdalias.py"),
                         "--profile", profile, "--shell"],
                        capture_output=True, text=True)
     if r.returncode != 0:
@@ -151,13 +161,129 @@ def shown(v):
     return v if isinstance(v, str) else "%#x" % v
 
 
+def _adrp(w, pc):
+    if (w & 0x9F000000) != 0x90000000:
+        return None
+    immlo = (w >> 29) & 3
+    immhi = (w >> 5) & 0x7FFFF
+    imm = (immhi << 2) | immlo
+    if imm & (1 << 20):
+        imm -= 1 << 21
+    return (pc & ~0xFFF) + (imm << 12)
+
+
+def _str32(w):
+    """STR Wt,[Xn,#imm12*4] -> (rn, rt, byte_off) or None."""
+    if (w & 0xFFC00000) != 0xB9000000:
+        return None
+    return (w >> 5) & 0x1F, w & 0x1F, ((w >> 10) & 0xFFF) << 2
+
+
+def _addimm(w):
+    """ADD Xd,Xn,#imm12[,LSL 12] -> (rn, rd, byte_off) or None."""
+    if (w & 0x9F000000) != 0x91000000:
+        return None
+    off = (w >> 10) & 0xFFF
+    if (w >> 22) & 3:
+        off <<= 12
+    return (w >> 5) & 0x1F, w & 0x1F, off
+
+
+def derive_1712():
+    """Independent authority for the 1.17.12 route-6 targets -- same derivations that produced
+    the numbers, re-run mechanically so a hand-typo in clobber.c cannot ship:
+      modprobe  : the unique b'/sbin/modprobe\x00' literal, VA = foff + 0xffffffc000080000,
+                  cross-checked against the recovered kallsyms row for modprobe_path;
+      enforce   : enforcing_setup's `adrp x0,<page>` + `str w1,[x0,#imm]` pair;
+      perm_map  : the adrp+add target security_load_policy references most, +0x1b0."""
+    R = os.path.dirname(T)
+    imgp, kalp = os.path.join(R, "fw/1712/Image"), os.path.join(R, "art/kallsyms-1712-real.txt")
+    for p in (imgp, kalp):
+        if not os.path.exists(p):
+            raise SystemExit("gate: %s missing -- the 1.17.12 profile's authority is the Image "
+                             "plus the recovered kallsyms; without them nothing may be built" % p)
+    img = open(imgp, "rb").read()
+    C = 0xFFFFFFC000080000
+    syms, order = {}, []
+    for line in open(kalp, encoding="utf-8", errors="replace"):
+        m = re.match(r"^([0-9a-fA-F]{8,16})\s+\S+\s+(\S+)", line)
+        if m:
+            syms[m.group(2)] = int(m.group(1), 16)
+            order.append((int(m.group(1), 16), m.group(2)))
+    for need in ("modprobe_path", "enforcing_setup", "security_load_policy"):
+        if need not in syms:
+            raise SystemExit("gate: %s is absent from art/kallsyms-1712-real.txt -- refuse" % need)
+
+    lit = img.find(b"/sbin/modprobe\x00")
+    if lit < 0:
+        raise SystemExit("gate: no /sbin/modprobe literal in fw/1712/Image -- refuse")
+    mod = C + lit
+    if syms["modprobe_path"] != mod:
+        raise SystemExit("gate: literal says modprobe_path=%#x, kallsyms says %#x -- refuse"
+                         % (mod, syms["modprobe_path"]))
+
+    def window(va, n=16):
+        off = va - C
+        return [int.from_bytes(img[off + 4 * k:off + 4 * k + 4], "little") for k in range(n)]
+
+    enf = None
+    ws = window(syms["enforcing_setup"])
+    for k in range(len(ws)):
+        page = _adrp(ws[k], syms["enforcing_setup"] + 4 * k)
+        if page is None or (ws[k] & 0x1F) != 0:
+            continue
+        for m in range(k + 1, min(k + 9, len(ws))):
+            t = _str32(ws[m])
+            if t and t[0] == 0 and t[1] == 1:
+                enf = page + t[2]
+                break
+        if enf:
+            break
+    if enf is None:
+        raise SystemExit("gate: no adrp x0 + str w1,[x0,#imm] shape inside enforcing_setup -- refuse")
+
+    nxt = min(v for v, n in order if v > syms["security_load_policy"])
+    lo, hi = syms["security_load_policy"], nxt
+    cnt, adrp = {}, {}
+    for pc in range(lo, hi, 4):
+        w = int.from_bytes(img[pc - C:pc - C + 4], "little")
+        a = _adrp(w, pc)
+        if a is not None:
+            adrp[w & 0x1F] = a
+            continue
+        t = _addimm(w)
+        if t and t[0] in adrp:
+            cnt[adrp[t[0]] + t[2]] = cnt.get(adrp[t[0]] + t[2], 0) + 1
+    if not cnt:
+        raise SystemExit("gate: security_load_policy references no static object -- refuse")
+    pdb = max(cnt, key=cnt.get)
+    if cnt[pdb] < 2:
+        raise SystemExit("gate: policydb candidate %#x seen once -- a single xref is not an "
+                         "identification, refuse" % pdb)
+    perm = pdb + 0x1B0
+
+    top = max(v for v, n in order)
+    for name, v in (("enforce", enf), ("perm_map", perm)):
+        if not syms["_etext"] < v <= top + 0x100000:
+            raise SystemExit("gate: %s=%#x outside the image's data/bss span -- refuse" % (name, v))
+    if not perm > enf:
+        raise SystemExit("gate: perm_map %#x not above selinux_enforcing %#x -- layout refuse" % (perm, enf))
+
+    return {"MODPROBE_1712": mod, "ENFORCE_1712": enf, "PERM_MAP_1712": perm,
+            # the descriptor both alias routes use (checked by the generic arm below)
+            "ALIAS_DESC_HEX": "1107004000004000"}
+
+
 def check(src, label):
     """Every expected pair is compared, and the count is reported (silence is not a verdict)."""
     bad = []
     n = 0
     for profile, pairs in MAP.items():
-        kv = derive(profile)
-        kv.update(kall_kv(profile))
+        if profile == "6.0.1-1712":
+            kv = derive_1712()
+        else:
+            kv = derive(profile)
+            kv.update(kall_kv(profile))
         for key, name, how in pairs:
             a = authority(kv, key, how)
             c = define_str(src, name) if how == "str" else define(src, name)

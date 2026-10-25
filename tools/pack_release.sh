@@ -54,8 +54,11 @@ echo ota8/syms8.txt >> "$LIST"
   # from the manifest for the same reason -- a stale literal still "verifies".
   find art -maxdepth 1 -name 'ledger-*.md' | sort
   find art -maxdepth 1 -name 'UNLOCK-*.md' | sort
-  echo art/kallsyms_real.txt
-  echo art/kallsyms-7-real.txt
+  # recovered symbol tables and live-policy authorities: derived, not enumerated -- the 1.17.12
+  # trio (kallsyms + policy tsv + the dump it parses) is evidence for this release the same way
+  # kallsyms-7-real.txt is for the 7.x routes, and a hardcoded pair here would ship without them.
+  find art -maxdepth 1 -name 'kallsyms*-real.txt' | sort
+  find art -maxdepth 1 \( -name 'policy-types-*-live.tsv' -o -name 'pol*-live.bin' \) | sort
   echo art/PORT-RUNBOOK-7.md
   # same rule as the ledgers above: derive the on-device evidence from disk.  The hardcoded pair here
   # would have shipped v1.9.21 without the acceptance run that its own STATUS cites.
@@ -88,7 +91,8 @@ sed -i "1i # 在此目录内校验：sha256sum -c SHA256SUMS.txt（这两行是�
   echo "# A) 包内关键件（下面这些无 # 前缀的行就是校验行，\`sha256sum -c\` 直接吃本文件）："
   sha256sum "$APK"
   sha256sum tools/clobber.c tools/esc8.c tools/esc.h tools/copy_atomic.h tools/borrow_verdict.h \
-            tools/hp_gain7.py tools/pgdalias.py tools/gate_constants.py \
+            tools/hp_gain7.py tools/pgdalias.py tools/gate_constants.py tools/exempt_bits_check.py \
+            tools/gen_policy_tsv.py tools/run_temproot.sh \
             tools/verify_approot.sh tools/rehearse_sugate.sh tools/port_check.sh tools/build_all.sh \
             tools/apk/jni/jni_esc.c tools/apk/build.sh \
             tools/apk/src/com/xplay6/temproot/Chain.java \
@@ -101,13 +105,17 @@ sed -i "1i # 在此目录内校验：sha256sum -c SHA256SUMS.txt（这两行是�
             tools/apk/assets/modlist.sh tools/apk/assets/modboot.sh \
             tools/sud.c tools/relayd.c tools/broot7.c tools/suc.c tools/sumount.c tools/nsmbind.c \
             exp8/w2215.c exp8/kgsl-plan.md ota8/config.txt ota8/syms8.txt \
-            art/kallsyms-7-real.txt art/kallsyms_real.txt art/chain-1.9.19-boot.txt
+            art/kallsyms-7-real.txt art/kallsyms_real.txt art/kallsyms-1712-real.txt \
+            art/policy-types-1712-live.tsv art/pol1712-live.bin art/chain-1.9.19-boot.txt
   echo
   echo "# B) 不在包里（机主选择瘦包）。这两枚是 tools/pgdalias.py 与构建入口那道闸的权威依据；自己从同 ROM 的"
   echo "#    boot.img 取出 kernel 后，必须与下面两行逐字节相同，否则站点推导就没有意义（镜像不同＝地址不同）。"
-  sha256sum fw/7/Image fw/Image
+  sha256sum fw/7/Image fw/Image fw/1712/Image
   echo
-  echo "#    拿到镜像后先跑这两条，它们会自己说不说话："
+  echo "# 1.17.12 路线（v1.9.39 起）的权威依据 fw/1712/Image 同上：不在包里，哈希在 B 段；"
+  echo "#    gate_constants.py 的 6.0.1-1712 臂与 exempt_bits_check.py 的 1712 臂用它和 A 段的"
+  echo "#    kallsyms-1712-real.txt / policy-types-1712-live.tsv 重新推导全部三个地址与豁免位。"
+  echo "#    拿到镜像后先跑这三条，它们会自己说不说话："
   echo "#      python3 tools/pgdalias.py --profile 7        （站点 0xffffffc000323400 的四项现读断言）"
   echo "#      python3 tools/gate_constants.py --selftest   （18 对比较 + 9 枚臂，含耳机增益那一枚）"
   echo

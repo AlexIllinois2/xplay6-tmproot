@@ -1,0 +1,16 @@
+ok    1 app-private dir, 0600 list owned by that app             1
+ok    2 root:root 0666 -- OTHER may write, so refused            0
+ok    2b root:root 0660 while daemon is in group 0 -- usable     1
+ok    2c 0660 owned by another group -- refused                  0
+ok    3 0666 list whose group is not ours                        0
+ok    4 list in a world-writable dir owned by someone else       0
+ok    5 shared-dir rule, list owned by uid 2000                  0
+ok    6 shared-dir rule, 0600 list owned by root                 1
+ok    7 shared-dir rule, root list but 0666                      0
+ok    8 directory planted where the list is read                 0
+ok    9 0771 app dir + root-owned 0600 list (real layout)        1
+ok    9b same shape but a shared-dir candidate, owner not root   0
+ok    9c same shape, group-writable parent, root file, shared rule 1
+wiring  private-dir 0600=1 (want 1) | 0777-dir same owner=1 | shared rule on it=0 (want 0)
+        dir uid=1000 mode=0777, file uid=1000 mode=0600
+grants rule: all arms pass: 0 failure(s)

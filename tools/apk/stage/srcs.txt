@@ -1,0 +1,8 @@
+/home/v/.local/project/xplay6/xplay6-tmproot/tools/apk/src/com/xplay6/temproot/Boot.java
+/home/v/.local/project/xplay6/xplay6-tmproot/tools/apk/src/com/xplay6/temproot/BootJob.java
+/home/v/.local/project/xplay6/xplay6-tmproot/tools/apk/src/com/xplay6/temproot/Chain.java
+/home/v/.local/project/xplay6/xplay6-tmproot/tools/apk/src/com/xplay6/temproot/Esc.java
+/home/v/.local/project/xplay6/xplay6-tmproot/tools/apk/src/com/xplay6/temproot/EscService.java
+/home/v/.local/project/xplay6/xplay6-tmproot/tools/apk/src/com/xplay6/temproot/Main.java
+/home/v/.local/project/xplay6/xplay6-tmproot/tools/apk/src/com/xplay6/temproot/Modules.java
+/home/v/.local/project/xplay6/xplay6-tmproot/tools/apk/src/com/xplay6/temproot/Ui.java
