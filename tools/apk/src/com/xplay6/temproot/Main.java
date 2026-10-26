@@ -78,6 +78,10 @@ public final class Main extends Activity {
     private EditText search;
     private TextView listSummary, sysToggleSub, emptyView;
     private Ui.Toggle sysToggle;
+    private Ui.Toggle adbInputToggle;
+    private Ui.Toggle hifiToggle;
+    private Ui.Toggle devWarnToggle;
+    private TextView hifiNote;
 
     private LinearLayout gainRow601, gainRowStock;
     private ImageView gainCheck601, gainCheckStock;
@@ -147,6 +151,10 @@ public final class Main extends Activity {
         logger.line("xplay6 tmproot " + versionName()
                 + " · 仅内存态：重启回到出厂；未提权时任何 PATH 上都没有 su");
         updateGainSettings();
+        updateHifiSettings();
+        /* 全局 Hi-Fi 不依赖 root，但标志活在 audioserver 里：每次进程起来都按存储的
+         * 选择重放一次，重启/音频服务重启后不会悄悄丢掉。 */
+        Chain.applyHifiChoice(this, logger);
         rebuild();
         refresh();
         status();
@@ -984,7 +992,7 @@ public final class Main extends Activity {
         sv.addView(col, new ScrollView.LayoutParams(-1, -2));
 
         col.addView(u.heading("设置", 28, Ui.TEXT));
-        TextView sub = u.text("授权、音频与诊断", 13, Ui.MUTED, Ui.REG);
+        TextView sub = u.text("授权、USB 调试、音频与诊断", 13, Ui.MUTED, Ui.REG);
         LinearLayout.LayoutParams subLp = new LinearLayout.LayoutParams(-1, -2);
         subLp.topMargin = u.dp(5);
         col.addView(sub, subLp);
@@ -1008,8 +1016,71 @@ public final class Main extends Activity {
                 }));
         col.addView(sec1, cardLp());
 
+        addSection(col, "USB 调试");
+        LinearLayout secAdb = newCard();
+        LinearLayout adbRow = settingRow(-1, "USB 模拟点击",
+                "提权成功后自动写入系统开关，不需要登录 vivo 账号",
+                null, Ui.TEXT, false, new Runnable() {
+                    @Override
+                    public void run() {
+                        toggleAdbInput();
+                    }
+                });
+        adbInputToggle = new Ui.Toggle(this, u);
+        adbInputToggle.setChecked(Chain.adbInputChoice(this));
+        adbInputToggle.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                toggleAdbInput();
+            }
+        });
+        adbRow.addView(adbInputToggle, new LinearLayout.LayoutParams(u.dp(52), u.dp(32)));
+        secAdb.addView(adbRow);
+        col.addView(secAdb, cardLp());
+
+        addSection(col, "系统提示");
+        LinearLayout secWarn = newCard();
+        LinearLayout warnRow = settingRow(-1, "隐藏开发模式警告",
+                "只去掉状态栏那条黄条；开发者选项和 USB 调试照旧",
+                null, Ui.TEXT, false, new Runnable() {
+                    @Override
+                    public void run() {
+                        toggleDevWarn();
+                    }
+                });
+        devWarnToggle = new Ui.Toggle(this, u);
+        devWarnToggle.setChecked(Chain.devWarnChoice(this));
+        devWarnToggle.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                toggleDevWarn();
+            }
+        });
+        warnRow.addView(devWarnToggle, new LinearLayout.LayoutParams(u.dp(52), u.dp(32)));
+        secWarn.addView(warnRow);
+        col.addView(secWarn, cardLp());
+
         addSection(col, "音频");
         LinearLayout sec2 = newCard();
+        LinearLayout hifiRow = settingRow(-1, "全局 Hi-Fi（强制）",
+                "有线耳机下让所有应用走 ES9038，绕过 vivo 白名单",
+                null, Ui.TEXT, false, new Runnable() {
+                    @Override
+                    public void run() {
+                        toggleHifi();
+                    }
+                });
+        hifiToggle = new Ui.Toggle(this, u);
+        hifiToggle.setChecked(Chain.hifiChoice(this));
+        hifiToggle.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                toggleHifi();
+            }
+        });
+        hifiRow.addView(hifiToggle, new LinearLayout.LayoutParams(u.dp(52), u.dp(32)));
+        sec2.addView(hifiRow);
+        sec2.addView(divider());
         gainRow601 = settingRow(-1, "跟随 1.15.1", "把输出增益切成 1.15.1 那一档",
                 null, Ui.TEXT, false, new Runnable() {
                     @Override
@@ -1032,6 +1103,12 @@ public final class Main extends Activity {
         gainRowStock.addView(gainCheckStock, trailingIconLp());
         sec2.addView(gainRowStock);
         col.addView(sec2, cardLp());
+        hifiNote = u.text("全局 Hi-Fi：未开启", 12, Ui.MUTED, Ui.REG);
+        hifiNote.setLineSpacing(u.dp(2), 1f);
+        LinearLayout.LayoutParams hnLp = new LinearLayout.LayoutParams(-1, -2);
+        hnLp.leftMargin = u.dp(4);
+        hnLp.topMargin = u.dp(8);
+        col.addView(hifiNote, hnLp);
         gainNote = u.text("耳机增益：未改（7 自己的 DT 值）", 12, Ui.MUTED, Ui.REG);
         gainNote.setLineSpacing(u.dp(2), 1f);
         LinearLayout.LayoutParams gnLp = new LinearLayout.LayoutParams(-1, -2);
@@ -1189,6 +1266,56 @@ public final class Main extends Activity {
         return row;
     }
 
+    /** Store the decision and, when it is turned on while root is already up, apply it at once.
+     *  Chain.run applies it again on every successful escalation (manual 提权 and boot alike). */
+    private void toggleAdbInput() {
+        final boolean on = !Chain.adbInputChoice(this);
+        final boolean kept = Chain.saveAdbInputChoice(this, on);
+        if (adbInputToggle != null)
+            adbInputToggle.setChecked(Chain.adbInputChoice(this));
+        logger.line("USB模拟点击: 开关 -> " + (on ? "开" : "关") + (kept ? "" : "（保存失败）"));
+        if (!on)
+            return;
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                final boolean ok = Chain.applyAdbInputChoice(Main.this, logger);
+                ui.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        toast(ok ? "USB模拟点击已开启（免 vivo 账号）"
+                                : "开关已存下，但这次没写成功；提权成功后会再试，详见运行日志");
+                    }
+                });
+            }
+        }).start();
+    }
+
+    /** 隐藏「开发模式」黄条：开 = root 侧常驻 watcher 每 3s 取消 id=10100；关 = 删哨兵让它
+     *  自己退出。开发者选项本身不动，所以 USB 调试不受影响。 */
+    private void toggleDevWarn() {
+        final boolean on = !Chain.devWarnChoice(this);
+        final boolean kept = Chain.saveDevWarnChoice(this, on);
+        if (devWarnToggle != null)
+            devWarnToggle.setChecked(Chain.devWarnChoice(this));
+        logger.line("开发模式警告: 开关 -> " + (on ? "开" : "关") + (kept ? "" : "（保存失败）"));
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                final boolean ok = Chain.applyDevWarnChoice(Main.this, logger);
+                ui.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        toast(on
+                                ? (ok ? "已开始隐藏开发模式警告（3 秒内清除）"
+                                      : "开关已存下，提权成功后会再试，详见运行日志")
+                                : "已停止隐藏；系统下次提示时警告会回来");
+                    }
+                });
+            }
+        }).start();
+    }
+
     private void updateGainSettings() {
         if (gainCheck601 == null)
             return;
@@ -1202,6 +1329,42 @@ public final class Main extends Activity {
         gainNote.setText(a ? "耳机增益：请求 1.15.1 那档（RAM 读不回是设计如此），重启后由开机链再写"
                 : b ? "耳机增益：请求本机 DT 那档"
                 : "耳机增益：未改（7 自己的 DT 值）");
+    }
+
+    private void updateHifiSettings() {
+        if (hifiToggle == null)
+            return;
+        boolean on = Chain.hifiChoice(this);
+        hifiToggle.setChecked(on);
+        if (hifiNote != null)
+            hifiNote.setText(on
+                    ? "全局 Hi-Fi：已请求 force_enable_hifi=1 · 只影响有线耳机，外放/蓝牙不变；"
+                      + "重启或音频服务重启后由开机流程重放"
+                    : "全局 Hi-Fi：未开启 · 关闭后本次开机内 HAL 的 force 标志可能仍粘住，重启才彻底恢复");
+    }
+
+    private void toggleHifi() {
+        final boolean on = !Chain.hifiChoice(this);
+        final boolean kept = Chain.saveHifiChoice(this, on);
+        updateHifiSettings();
+        logger.line("全局Hi-Fi: 开关 -> " + (on ? "开" : "关") + (kept ? "" : "（保存失败）"));
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                final String out = Chain.hifiForce(on);
+                final boolean ok = Chain.hifiForceLanded(out);
+                logger.line("全局Hi-Fi: force_enable_hifi=" + (on ? 1 : 0) + " -> " + out);
+                ui.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        toast(on
+                                ? (ok ? "已请求全局 Hi-Fi，插上有线耳机后生效"
+                                      : "请求没送达 AudioFlinger：" + out)
+                                : "已关闭。HAL 的强制标志有粘性，重启后彻底恢复");
+                    }
+                });
+            }
+        }).start();
     }
 
     private void hpGain(final String arm) {
@@ -1339,8 +1502,10 @@ public final class Main extends Activity {
             refresh();
         if (p == PAGE_HOME)
             status();
-        if (p == PAGE_SETTINGS)
+        if (p == PAGE_SETTINGS) {
             updateGainSettings();
+            updateHifiSettings();
+        }
     }
 
     private View buildLogOverlay() {

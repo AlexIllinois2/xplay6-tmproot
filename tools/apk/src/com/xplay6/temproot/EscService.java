@@ -37,9 +37,21 @@ public final class EscService extends Service {
         /* Route 8's responder (a shell script) cannot attribute a caller by uid, so every request it
          * accepts must carry the token.  The boot path can run in a process where Main.onCreate never
          * did, so load the token and recover the route here before anything calls Chain.su() --
-         * otherwise the "already escalated" branch's unlockAdbInput() would send a token-less request
-         * and be refused on 8.1 (routes 6/7 still fall back to their peer attribution). */
+         * otherwise the "already escalated" branch's applyAdbInputChoice() would send a token-less
+         * request and be refused on 8.1 (routes 6/7 still fall back to their peer attribution). */
         Chain.useToken(this);
+        /* 「全局 Hi-Fi」不依赖 root（MODIFY_AUDIO_SETTINGS 已够），但 force 标志活在
+         * audioserver 进程里，所以每次开机/服务启动都按存储的选择重放一次。 */
+        try {
+            Chain.applyHifiChoice(this, new Chain.Log() {
+                @Override
+                public void line(String s) {
+                    Log.i("TempRoot-boot", s);
+                }
+            });
+        } catch (Throwable t) {
+            Log.i("TempRoot-boot", "hifi apply failed: " + t);
+        }
         /* The boot/job trigger must not fire the binder needle a second time on a boot that is already
          * served: every attempt carries the leak loop's measured crash rate, and a second daemon would
          * find 12345/12346 taken anyway.  The UI's 提权 button goes through Chain.run directly, so an
@@ -55,13 +67,26 @@ public final class EscService extends Service {
                     Log.i("TempRoot-boot", s);
                 }
             });
-            unlockAdbInput();
-            /* Rebuild the module mounts for THIS boot and run the modules'
-             * service phase.  Chain.su is a TCP socket, so this stays off the
-             * main thread; best-effort inside Modules.bootRun. */
+            /* The 「USB 模拟点击」 switch is the operator's decision, and this branch never runs
+             * Chain.run (no needle fired) -- so apply it here.  On the worker thread: Chain.su
+             * falls back to a Java socket, which the main thread may not open. */
             new Thread(new Runnable() {
                 @Override
                 public void run() {
+                    Chain.applyAdbInputChoice(EscService.this, new Chain.Log() {
+                        @Override
+                        public void line(String s) {
+                            Log.i("TempRoot-boot", s);
+                        }
+                    });
+                    /* Same reason: this branch never runs Chain.run, and the vendor's
+                     * 开发模式 notification watcher has to be re-armed after every boot. */
+                    Chain.applyDevWarnChoice(EscService.this, new Chain.Log() {
+                        @Override
+                        public void line(String s) {
+                            Log.i("TempRoot-boot", s);
+                        }
+                    });
                     Modules.bootRun(EscService.this);
                 }
             }, "temproot-mods").start();
@@ -95,7 +120,7 @@ public final class EscService extends Service {
                             Log.i("TempRoot-boot", s);
                         }
                     }, 24);
-                    unlockAdbInput();
+                    /* USB 模拟点击 is applied inside Chain.run when the operator's switch is on. */
                     /* Fresh escalation: apply module mounts + run the modules'
                      * boot scripts while we are already on a worker thread. */
                     Modules.bootRun(EscService.this);
@@ -126,16 +151,5 @@ public final class EscService extends Service {
             }
         }, "temproot-boot").start();
         return START_NOT_STICKY;
-    }
-
-    /** Plant Settings' own `account_verified_ok` so the 「USB模拟点击」 row stops demanding a vivo account.
-     *  Chain.unlockAdbInput's comment carries why this is only a file write -- the switch itself still
-     *  needs a finger, because the daemon's root cannot reach the settings provider. */
-    private static void unlockAdbInput() {
-        try {
-            Log.i("TempRoot-boot", "adb-input witness: " + Chain.unlockAdbInput());
-        } catch (Throwable t) {
-            Log.i("TempRoot-boot", "adb-input unlock could not run: " + t);
-        }
     }
 }

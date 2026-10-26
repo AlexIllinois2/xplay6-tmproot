@@ -12,6 +12,9 @@
 
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- AudioFlinger 的 settingsAllowed() 只查这一项（normal 权限，安装即授予）；
+         全局 Hi-Fi 的 force_enable_hifi 参数靠它放行，不需要 root。 -->
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
 
     <application
         android:allowBackup="false"

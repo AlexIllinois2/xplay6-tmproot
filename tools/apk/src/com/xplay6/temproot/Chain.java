@@ -138,6 +138,15 @@ public final class Chain {
                 openSuName(ctx, log, rounds);
             if (rooted)
                 startRelay(ctx, log);
+            /* The operator's 「USB 模拟点击」 switch.  Manual 提权 and every automatic trigger
+             * pass through here, so this is the one place that has to honour it. */
+            if (rooted)
+                applyAdbInputChoice(ctx, log);
+            /* 开发模式那条黄色警告由 com.vivo.daemonService 在每次写
+             * development_settings_enabled 时重发，一次取消压不住，得让 root 侧常驻
+             * watcher 每 3s 再取消一次（只动通知，不改开发者选项本身）。 */
+            if (rooted)
+                applyDevWarnChoice(ctx, log);
             if (rooted && mapPlanted)
                 restoreEnforcing(log);
             else if (rooted && is8)
@@ -1202,10 +1211,11 @@ public final class Chain {
      * SharedPreferences("development").getBoolean("account_verified_ok") first and, when true, writes the
      * flag without asking for an account at all.  So this plants that record.
      *
-     * It is deliberately a file write and nothing more: the daemon's root has no servicemanager access
-     * (`dumpsys window` -> "Can't find service: window", `settings put` -> null IActivityManager), so it
-     * can never write the Secure value itself -- the last move stays a finger on the switch, and this
-     * method only makes that move account-free.  Settings' manifest carries
+     * It is a file write and nothing more: this half only makes the vendor row account-free.
+     * The flag itself is written by enableAdbInput(), which this build's root can reach -- measured
+     * 2026-10-26 on 1.17.12, where `settings put` as uid 0 lands and injection starts working.  Keep
+     * both: on a build whose root cannot reach the settings provider, the file plant still lets the
+     * operator flip the row without logging in.  Settings' manifest carries
      * defaultToDeviceProtectedStorage=true, so its prefs live under /data/user_de; writing the /data/data
      * path reads back false silently (measured twice).  Idempotent -- an existing record is left alone.
      * Returns the daemon's witness, never a verdict of its own.
@@ -1224,6 +1234,224 @@ public final class Chain {
                 + "echo \"UNLOCK_ADB_INPUT st=$st count=$(grep -c 'account_verified_ok.*true' $P 2>/dev/null) "
                 + "label=$(ls -Zd $P 2>/dev/null | cut -d' ' -f1)\"";
         return su(0, cmd);
+    }
+
+    static final String ADB_INPUT_FILE = "adbinput";
+
+    /** The operator's switch.  A missing file means "not chosen", so an upgrade keeps the ROM's
+     *  own state instead of silently turning the vendor flag on. */
+    public static boolean adbInputChoice(Context ctx) {
+        try {
+            InputStream in = ctx.openFileInput(ADB_INPUT_FILE);
+            byte[] b = new byte[8];
+            int n = in.read(b);
+            in.close();
+            return n > 0 && "1".equals(new String(b, 0, n).trim());
+        } catch (java.io.IOException e) {
+            return false;
+        }
+    }
+
+    public static boolean saveAdbInputChoice(Context ctx, boolean on) {
+        try {
+            OutputStream o = ctx.openFileOutput(ADB_INPUT_FILE, Context.MODE_PRIVATE);
+            o.write((on ? "1" : "0").getBytes());
+            o.close();
+            return true;
+        } catch (java.io.IOException e) {
+            return false;
+        }
+    }
+
+    /** Write Settings.Secure.vivo_adb_simulate_input through the root channel.  Measured on
+     *  1.17.12 (2026-10-26): as uid 0 the write answers PUT_RC=0 and adb `input` starts
+     *  injecting immediately -- a HOME keyevent that was dropped beforehand moved the focus
+     *  to the launcher right after.  The value lives in settings_secure.xml, so it survives a
+     *  reboot; the chain re-applies it on every escalation to undo any vendor reset. */
+    public static String enableAdbInput() {
+        return su(0, "settings put secure vivo_adb_simulate_input 1 2>&1; "
+                + "printf 'PUT_RC=%s ' $?; "
+                + "echo VALUE=$(settings get secure vivo_adb_simulate_input 2>&1)");
+    }
+
+    /** The single call site for the switch: off means the vendor flag is left exactly as the
+     *  ROM shipped it.  On, this writes the Secure value and also plants Settings' own
+     *  account-free record, so the vendor row stays usable if something resets the flag. */
+    public static boolean applyAdbInputChoice(Context ctx, Log log) {
+        if (!adbInputChoice(ctx)) {
+            log.line("USB模拟点击: 开关未开 -> 未写 vivo_adb_simulate_input");
+            return false;
+        }
+        String out = enableAdbInput();
+        boolean on = out != null && out.indexOf("VALUE=1") >= 0;
+        String ui = unlockAdbInput();
+        if (on)
+            log.line("USB模拟点击: 已开启（vivo_adb_simulate_input=1，免 vivo 账号）· UI: " + ui);
+        else
+            log.line("USB模拟点击: 直接写失败 -> "
+                    + (out == null ? "null" : out.replace('\n', ' ')) + " · UI 免登录标记: " + ui);
+        return on;
+    }
+
+    /* ------------------------------------------------------------------ *
+     * 全局 Hi-Fi（force_enable_hifi）。
+     *
+     * 这不是 root 能力：AudioFlinger::setParameters 只查
+     * android.permission.MODIFY_AUDIO_SETTINGS（normal，安装即授予），HAL 的
+     * adev_set_parameters 认 `force_enable_hifi`；随后 select_devices 把耳机设备
+     * （枚举 8/9）改写成 45 = SND_DEVICE_OUT_HEADPHONE_HIFI，于是不管流属于哪个
+     * 包都走 ES9038 —— 绕过的正是 vivo 的包名白名单
+     * （com.vivo.audiofx.hifi_whitelist.xml）。
+     *
+     * 标志活在 audioserver 进程里：audioserver/重启即消失，所以开机触发会按存储的
+     * 选择重放一次。它同时是粘性的 —— force=0 只把「当前有效状态」(adev+744) 读回
+     * 745，有效状态为 1 时等于没关；真正的关闭要等下一次干净启动。只覆盖有线耳机
+     * 输出，ES9038 不驱动外放/蓝牙。
+     * ------------------------------------------------------------------ */
+    static final String HIFI_FILE = "hifi";
+
+    public static boolean hifiChoice(Context ctx) {
+        try {
+            InputStream in = ctx.openFileInput(HIFI_FILE);
+            byte[] b = new byte[8];
+            int n = in.read(b);
+            in.close();
+            return n > 0 && "1".equals(new String(b, 0, n).trim());
+        } catch (java.io.IOException e) {
+            return false;
+        }
+    }
+
+    public static boolean saveHifiChoice(Context ctx, boolean on) {
+        try {
+            OutputStream o = ctx.openFileOutput(HIFI_FILE, Context.MODE_PRIVATE);
+            o.write((on ? "1" : "0").getBytes());
+            o.close();
+            return true;
+        } catch (java.io.IOException e) {
+            return false;
+        }
+    }
+
+    /** 7.1.1 没有 hidden-API 限制，AudioSystem.setParameters 反射即可调用；
+     *  rc=0 表示 AudioFlinger 已经收下并转给了 HAL。 */
+    public static String hifiForce(boolean on) {
+        try {
+            Class<?> c = Class.forName("android.media.AudioSystem");
+            java.lang.reflect.Method m = c.getMethod("setParameters", String.class);
+            Object r = m.invoke(null, "force_enable_hifi=" + (on ? 1 : 0));
+            return "rc=" + (r instanceof Integer ? ((Integer) r).intValue() : 0);
+        } catch (Throwable t) {
+            return "ERR " + t;
+        }
+    }
+
+    public static boolean hifiForceLanded(String out) {
+        return out != null && out.startsWith("rc=0");
+    }
+
+    /** 开关的唯一落地入口：开 = 把 HAL 标志打上；关 = 再发一次 0（粘住时是空操作，
+     *  下一次干净启动自然回到出厂行为）。不静默 —— 每个结果都写日志。 */
+    public static boolean applyHifiChoice(Context ctx, Log log) {
+        if (!hifiChoice(ctx))
+            return false;
+        String out = hifiForce(true);
+        boolean ok = hifiForceLanded(out);
+        log.line("全局Hi-Fi: force_enable_hifi=1 -> " + out
+                + (ok ? "（有线耳机下对所有应用生效）" : "（没送达 AudioFlinger）"));
+        return ok;
+    }
+
+    /* ------------------------------------------------------------------ *
+     * 隐藏「开发模式」黄色警告（通知 id 10100）。
+     *
+     * 警告不是设置里的一个开关，而是 com.vivo.daemonService 的 ongoing 通知：每次
+     * Settings 里 development_settings_enabled 被写，它就重新 notify(10100)，所以
+     * 一次取消没有用。取消它的调用本身要求调用者是 system 或同一应用
+     * （NotificationManagerService.checkCallerIsSystemOrSameApp），而
+     * isUidSystem(uid) 接受 uid 0 —— root 侧一个真正的 binder 客户端即可。
+     * `service call ... null ...` 不行：service 把 null 写成 null binder 而不是
+     * null String16，服务端收到的 id 会错位成 383。
+     *
+     * 只动通知，不动开发者选项：development_settings_enabled 保持 1，USB 调试照旧。
+     * 落地物是 root 侧常驻的 app_process（DevWarn），每 3s 取消一次；哨兵文件
+     * files/devwarn.on 不存在时它自己退出，开关就是删除/创建这个文件。
+     * ------------------------------------------------------------------ */
+    static final String DEVWARN_FILE = "devwarn";
+    static final String DEVWARN_SENTINEL = "devwarn.on";
+
+    public static File devWarnSentinel(Context ctx) {
+        return new File(ctx.getFilesDir(), DEVWARN_SENTINEL);
+    }
+
+    /** 缺省为开：这个应用就是为「开着开发模式但不想要黄条」用的，升级后不该要求
+     *  用户再去找一次开关。 */
+    public static boolean devWarnChoice(Context ctx) {
+        try {
+            InputStream in = ctx.openFileInput(DEVWARN_FILE);
+            byte[] b = new byte[8];
+            int n = in.read(b);
+            in.close();
+            return n <= 0 || "1".equals(new String(b, 0, n).trim());
+        } catch (java.io.IOException e) {
+            return true;
+        }
+    }
+
+    public static boolean saveDevWarnChoice(Context ctx, boolean on) {
+        try {
+            OutputStream o = ctx.openFileOutput(DEVWARN_FILE, Context.MODE_PRIVATE);
+            o.write((on ? "1" : "0").getBytes());
+            o.close();
+            return true;
+        } catch (java.io.IOException e) {
+            return false;
+        }
+    }
+
+    /** app_process reads CLASSPATH and ANDROID_DATA from the environment; the installed
+     *  APK itself is the class path, so no extra asset has to be staged.  setsid detaches
+     *  it from the su shell that is about to exit. */
+    static String devWarnCommand(Context ctx) {
+        String s = devWarnSentinel(ctx).getAbsolutePath();
+        String apk = ctx.getPackageCodePath();
+        return "S='" + s + "'; A='" + apk + "'; "
+                + "if [ ! -f \"$S\" ]; then echo DEVWARN_NO_SENTINEL; exit 0; fi; "
+                + "if [ ! -f \"$A\" ]; then echo DEVWARN_NO_APK; exit 0; fi; "
+                + "export ANDROID_ROOT=/system ANDROID_DATA=/data ANDROID_ASSETS=/system/app "
+                + "ANDROID_STORAGE=/storage EXTERNAL_STORAGE=/sdcard CLASSPATH=\"$A\"; "
+                + "/system/bin/setsid /system/bin/app_process /system/bin com.xplay6.temproot.DevWarn \"$S\" "
+                + ">/dev/null 2>&1 & echo DEVWARN_STARTED";
+    }
+
+    /** 开关的唯一落地入口：开 = 建哨兵并（重新）拉起 watcher；关 = 删哨兵，watcher
+     *  在一个轮询周期内自己退出。失败都写日志，不静默。 */
+    public static boolean applyDevWarnChoice(Context ctx, Log log) {
+        File s = devWarnSentinel(ctx);
+        if (!devWarnChoice(ctx)) {
+            boolean had = s.exists();
+            if (had && !s.delete()) {
+                String out = root("rm -f '" + s.getAbsolutePath() + "' 2>/dev/null; echo DEVWARN_STOP");
+                log.line("开发模式警告: 开关未开 -> 删除哨兵 " + (out == null ? "null" : trim1(out)));
+                return false;
+            }
+            log.line("开发模式警告: 开关未开 -> " + (had ? "已让 watcher 退出" : "未启动"));
+            return false;
+        }
+        try {
+            OutputStream o = new java.io.FileOutputStream(s);
+            o.write("1".getBytes());
+            o.close();
+        } catch (Throwable t) {
+            log.line("开发模式警告: 哨兵写入失败: " + t);
+            return false;
+        }
+        String out = root(devWarnCommand(ctx));
+        boolean ok = out != null && out.indexOf("DEVWARN_STARTED") >= 0;
+        log.line("开发模式警告: " + (ok
+                ? "watcher 已请求（root 侧每 3s 取消 id=10100；开发者选项本身保留）"
+                : "watcher 启动失败 -> " + trim1(out == null ? "null" : out)));
+        return ok;
     }
 
     /* ------------------------------------------------------------------ *
