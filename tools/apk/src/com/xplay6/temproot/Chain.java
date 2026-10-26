@@ -1054,6 +1054,51 @@ public final class Chain {
     }
 
     /* ------------------------------------------------------------------ *
+     * The adb shell grant (uid 2000).
+     *
+     * Root managers ship this as one settings switch, and it is the same NUMBER the
+     * app-list row for com.android.shell edits -- there is deliberately no second copy
+     * of the truth: shellGranted() reads the allow list, so the switch and the row can
+     * never disagree.  Both daemons re-read the list per request (sud.c uid_allowed,
+     * relayd.c allowed), so a flip here is live without restarting anything.
+     * ------------------------------------------------------------------ */
+    public static final int SHELL_UID = 2000;
+
+    /** Is the adb shell on the allow list right now?  An unreadable list reads as
+     *  "not granted" -- the caller's write path refuses in that case anyway, so the
+     *  switch can never claim a state the daemon does not see. */
+    public static boolean shellGranted(Context ctx) {
+        List<Integer> g = readGrantsOrNull(ctx);
+        return g != null && g.contains(Integer.valueOf(SHELL_UID));
+    }
+
+    /** Add or remove the adb shell uid, preserving every other entry.  Same refusal rule
+     *  as selfGrant: a list this uid cannot read is left ALONE, because rewriting what we
+     *  cannot see is how the owner's entries (Shizuku 10133, snub 10135 -- ledger 670/676)
+     *  used to vanish.  The manager's own uid is always kept, or the next toggle in the
+     *  app list could not be saved at all. */
+    public static boolean setShellGrant(Context ctx, boolean on) {
+        List<Integer> g = readGrantsOrNull(ctx);
+        if (g == null) {
+            lastGrantsError = "refusing to rewrite a list we cannot read: " + lastGrantsError;
+            return false;
+        }
+        int me = android.os.Process.myUid();
+        if (!g.contains(Integer.valueOf(me)))
+            g.add(Integer.valueOf(me));
+        if (on) {
+            if (!g.contains(Integer.valueOf(SHELL_UID)))
+                g.add(Integer.valueOf(SHELL_UID));
+        } else {
+            g.remove(Integer.valueOf(SHELL_UID));
+        }
+        /* Always rewritten, even for a no-op flip: a list left root-owned and 0666 by an
+         * earlier root-side edit is one the daemon refuses outright (sud.c
+         * grants_file_usable), and resealing is the only repair this uid can perform. */
+        return writeGrants(ctx, g);
+    }
+
+    /* ------------------------------------------------------------------ *
      * Requests to the daemon.
      * ------------------------------------------------------------------ */
 
@@ -1615,7 +1660,13 @@ public final class Chain {
         return out;
     }
 
-    /** Persist the checked set: uids of the apps the user ticked. */
+    /** Persist the checked set: uids of the apps the user ticked.
+     *  The adb shell grant is preserved from the on-disk list when it is there: it belongs
+     *  to the same uid as the com.android.shell row, but that row's state in the caller's
+     *  in-memory `checked` can be one refresh behind an ADB switch flip (the settings toggle
+     *  writes the list and refreshes asynchronously), and a whole-file rewrite from a stale
+     *  mirror is exactly how that grant would silently vanish.  Turning the shell row itself
+     *  off goes through setShellGrant, so this preservation never overrides a real revoke. */
     public static boolean saveSelection(Context ctx, List<Entry> all, List<String> checkedPkgs) {
         List<Integer> uids = new ArrayList<Integer>();
         for (Entry e : all)
@@ -1624,6 +1675,10 @@ public final class Chain {
         int me = android.os.Process.myUid();
         if (!uids.contains(Integer.valueOf(me)))
             uids.add(Integer.valueOf(me));
+        List<Integer> disk = readGrantsOrNull(ctx);
+        if (disk != null && disk.contains(Integer.valueOf(SHELL_UID))
+                && !uids.contains(Integer.valueOf(SHELL_UID)))
+            uids.add(Integer.valueOf(SHELL_UID));
         return writeGrants(ctx, uids);
     }
 

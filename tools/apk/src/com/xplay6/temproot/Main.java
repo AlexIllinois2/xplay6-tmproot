@@ -81,6 +81,7 @@ public final class Main extends Activity {
     private Ui.Toggle adbInputToggle;
     private Ui.Toggle hifiToggle;
     private Ui.Toggle devWarnToggle;
+    private Ui.Toggle adbRootToggle;
     private TextView hifiNote;
 
     private LinearLayout gainRow601, gainRowStock;
@@ -589,6 +590,14 @@ public final class Main extends Activity {
             toast("本应用始终保持授权，否则没人能再改这张表");
             return;
         }
+        if (e.uid == Chain.SHELL_UID) {
+            /* com.android.shell 这一行与设置页的「ADB root 权限」是同一枚 uid：点它等于点那个
+             * 开关，走同一条显式增删的路。整体重写（saveSelection）会照 checked 的旧像把名单
+             * 覆写回去，而那个像可能比设置页的开关旧一个刷新。目标态照这一行现在显示的样子取
+             * ——用户看到的是什么，点的就是什么。 */
+            toggleAdbRoot(!checked.contains(e.pkg));
+            return;
+        }
         final boolean on;
         if (checked.contains(e.pkg)) {
             checked.remove(e.pkg);
@@ -999,6 +1008,25 @@ public final class Main extends Activity {
 
         addSection(col, "授权与安全");
         LinearLayout sec1 = newCard();
+        LinearLayout adbRootRow = settingRow(Ui.TERMINAL, "ADB root 权限",
+                "授权 uid 2000：电脑上 adb shell 后 su 即得 root",
+                null, Ui.TEXT, false, new Runnable() {
+                    @Override
+                    public void run() {
+                        toggleAdbRoot();
+                    }
+                });
+        adbRootToggle = new Ui.Toggle(this, u);
+        adbRootToggle.setChecked(Chain.shellGranted(this));
+        adbRootToggle.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                toggleAdbRoot();
+            }
+        });
+        adbRootRow.addView(adbRootToggle, new LinearLayout.LayoutParams(u.dp(52), u.dp(32)));
+        sec1.addView(adbRootRow);
+        sec1.addView(divider());
         sec1.addView(settingRow(Ui.TRASH, "撤销全部授权", "保留本应用，其它应用立即失效",
                 null, Ui.RED, false, new Runnable() {
                     @Override
@@ -1291,6 +1319,49 @@ public final class Main extends Activity {
         }).start();
     }
 
+    /** ADB root 权限：开 = 把 uid 2000 写进授权名单；关 = 摘掉。两个守护进程都是每请求
+     *  重读名单（sud.c uid_allowed / relayd.c allowed），所以立即生效，不需要重启任何进程。
+     *  开关状态从名单现读（Chain.shellGranted），与「应用授权」页里 com.android.shell 那一行
+     *  永远是同一枚 uid 的两种看法，不可能对不一致。 */
+    private void toggleAdbRoot() {
+        toggleAdbRoot(!Chain.shellGranted(this));
+    }
+
+    private void toggleAdbRoot(final boolean on) {
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                final boolean ok = Chain.setShellGrant(Main.this, on);
+                ui.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        boolean now = Chain.shellGranted(Main.this);
+                        if (adbRootToggle != null)
+                            adbRootToggle.setChecked(now);
+                        logger.line("ADB root: uid 2000 -> " + (on ? "granted" : "revoked")
+                                + " saved=" + ok + " state=" + now
+                                + "  文件=" + Chain.grantsFile(Main.this).getAbsolutePath()
+                                + (ok ? "" : "  why=" + Chain.lastGrantsError));
+                        toast(ok
+                                ? (on ? "已授权 adb shell：电脑上 su 即得 root（8.1 用 sux）"
+                                      : "已撤销 adb shell 的 root 权限")
+                                : "保存授权名单失败，详见运行日志");
+                        /* 应用列表那一行与这个开关是同一枚 uid：改写之后必须重读，否则它还在
+                         * 显示旧状态，下一次在列表里勾任何应用都会把这里的决定覆写回去。 */
+                        refresh();
+                    }
+                });
+            }
+        }).start();
+    }
+
+    /** 每次设置页可见/名单被别处改过之后，让开关说真话。 */
+    private void updateAdbRootSetting() {
+        if (adbRootToggle == null)
+            return;
+        adbRootToggle.setChecked(Chain.shellGranted(this));
+    }
+
     /** 隐藏「开发模式」黄条：开 = root 侧常驻 watcher 每 3s 取消 id=10100；关 = 删哨兵让它
      *  自己退出。开发者选项本身不动，所以 USB 调试不受影响。 */
     private void toggleDevWarn() {
@@ -1406,6 +1477,7 @@ public final class Main extends Activity {
                     @Override
                     public void run() {
                         refresh();
+                        updateAdbRootSetting();
                         toast(ok ? "已撤销全部授权" : "撤销失败，详见运行日志");
                     }
                 });
@@ -1505,6 +1577,7 @@ public final class Main extends Activity {
         if (p == PAGE_SETTINGS) {
             updateGainSettings();
             updateHifiSettings();
+            updateAdbRootSetting();
         }
     }
 
