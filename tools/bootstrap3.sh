@@ -94,7 +94,7 @@ echo "=== 1. write the wrapper payload, plant map, point modprobe at it, flip (t
 # daemon that still holds 12345/12346), then execs the real daemon.  Doing it here is what makes the
 # measurement independent of which build served my channel: a sh spawned by an old (non-CLOEXEC) daemon
 # keeps holding the listener fds, so the test could never free the ports itself after its own daemon died.
-$ADB push /home/v/.local/project/xplay6/tools/sudK.sh $D/sudK >/dev/null 2>&1 \
+$ADB push /home/v/.local/project/xplay6/xplay6-tmproot/tools/sudK.sh $D/sudK >/dev/null 2>&1 \
 	|| { echo "ABORT: push sudK.sh"; exit 4; }
 run "cp $D/sudD $D/sudC; chmod 755 $D/sudC; chcon u:object_r:shell_data_file:s0 $D/sudC; \
 	chmod 755 $D/sudK; chcon u:object_r:shell_data_file:s0 $D/sudK; head -1 $D/sudK; \

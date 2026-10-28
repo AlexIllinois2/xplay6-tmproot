@@ -5,7 +5,7 @@ set -eu
 SDK=/home/v/Android/Sdk
 BT=$SDK/build-tools/35.0.0
 PLAT=$SDK/platforms/android-34/android.jar
-A=/home/v/.local/project/xplay6/tools/suprobe
+A=/home/v/.local/project/xplay6/xplay6-tmproot/tools/suprobe
 ROOT=/home/v/.local/project/xplay6/tools
 S=$A/stage
 

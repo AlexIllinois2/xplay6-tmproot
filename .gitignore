@@ -1,50 +1,45 @@
 # ---------------------------------------------------------------------------
-# 构建产物：全部可由 tools/build_all.sh / tools/apk/build.sh 重新生成，不入库
+# tools/: 源码白名单制。tools/ 第一层默认整体忽略, 只放行源码扩展名——
+# 编译产物(无扩展名二进制/.o/.out/.so/.log/.apk)新增时零维护;
+# 新源码请落在白名单扩展名 (.c/.h/.S/.sh/.py/.md/.txt/.xml/.json)。
 # ---------------------------------------------------------------------------
 
-# APK 打包中间目录与最终包（release/ 下已发布的包仍保留）
+# tools/ 第一层默认整体忽略
+tools/*
+
+# 源码扩展名白名单
+!tools/*.c
+!tools/*.h
+!tools/*.S
+!tools/*.sh
+!tools/*.py
+!tools/*.md
+!tools/*.txt
+!tools/*.xml
+!tools/*.json
+
+# 子目录单独放行 (tools/* 只作用于第一层)
+!tools/apk/
+!tools/mock/
+!tools/suprobe/
+
+# 特意入库的固化二进制与密钥 (1712 = 1.17.12 设备专用)
+!tools/clobber1712
+!tools/mpp1712
+!tools/rootsh1712
+
+# APK 打包: assets 同为白名单——只有源脚本入库,
+# 二进制副本 (broot7/clobber/nsmbind/relayd/su/sud/sumount/sysoverlay/closefds)
+# 由 tools/apk/build.sh 从 tools/ 复制生成; magisk_runtime.zip 由
+# tools/build_magisk_module.sh 生成, 均不入库
 tools/apk/stage/
 tools/temproot.apk
 tools/apk/demo/*.apk
+tools/apk/assets/*
+!tools/apk/assets/*.sh
 
-# build.sh 从 tools/ 复制进 assets 的二进制副本（源码不在这里）
-tools/apk/assets/broot7
-tools/apk/assets/clobber
-tools/apk/assets/nsmbind
-tools/apk/assets/relayd
-tools/apk/assets/su
-tools/apk/assets/sud
-tools/apk/assets/sumount
-
-# tools/build_all.sh 与各专项脚本编译出的静态二进制
-tools/broot
-tools/broot7
-tools/sud
-tools/suc
-tools/sumount
-tools/swap
-tools/calread
-tools/calget
-tools/clobber
-tools/sugate_probe
-tools/elflush
-tools/sgt_pay
-tools/icache_sync
-tools/nsmbind
-tools/rootsh
-tools/socktrig
-tools/kmodmark
-tools/relayd
-tools/umhraw
-tools/libesc.so
-
-# 主机侧自测程序与运行输出
-tools/grants_rule_test
-tools/copy_atomic_test
-tools/borrow_verdict_test
-tools/*.o
-tools/*.out
-tools/*.log
+# build/: 全部构建产物 (gdbpkg/magisk_runtime 模块树/zip/mgextract)
+build/
 
 # ---------------------------------------------------------------------------
 # 本机 / 临时文件

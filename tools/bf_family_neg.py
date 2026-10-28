@@ -7,7 +7,7 @@ import sys
 ROOT = "/home/v/.local/project/xplay6"
 ART = f"{ROOT}/art/audio-6.0.1"
 NAME = "tfa-bf-family.TfaBfNames.tsv"
-spec = importlib.util.spec_from_file_location("pm", "/home/v/.local/project/xplay6/tools/port_manifest.py")
+spec = importlib.util.spec_from_file_location("pm", "/home/v/.local/project/xplay6/xplay6-tmproot/tools/port_manifest.py")
 pm = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(pm)
 
