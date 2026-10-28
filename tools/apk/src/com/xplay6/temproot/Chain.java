@@ -1460,13 +1460,25 @@ public final class Chain {
     static String devWarnCommand(Context ctx) {
         String s = devWarnSentinel(ctx).getAbsolutePath();
         String apk = ctx.getPackageCodePath();
-        return "S='" + s + "'; A='" + apk + "'; "
+        String cf = new File(ctx.getFilesDir(), "closefds").getAbsolutePath();
+        // The watcher is long-lived and this command runs from the root shell,
+        // which carries the ladder's inherited binder fds; start it through
+        // closefds so it does not hold the pile for its whole lifetime.  The
+        // wrapper closes COPIES only (sud keeps the originals), so this can
+        // never fire the poisoned binder_release.  Without the wrapper (first
+        // boot after an update, before staging) we still start, just dirty.
+        return "S='" + s + "'; A='" + apk + "'; CF='" + cf + "'; "
                 + "if [ ! -f \"$S\" ]; then echo DEVWARN_NO_SENTINEL; exit 0; fi; "
                 + "if [ ! -f \"$A\" ]; then echo DEVWARN_NO_APK; exit 0; fi; "
                 + "export ANDROID_ROOT=/system ANDROID_DATA=/data ANDROID_ASSETS=/system/app "
                 + "ANDROID_STORAGE=/storage EXTERNAL_STORAGE=/sdcard CLASSPATH=\"$A\"; "
+                + "if [ -x \"$CF\" ]; then "
+                + "/system/bin/setsid \"$CF\" /system/bin/app_process /system/bin com.xplay6.temproot.DevWarn \"$S\" "
+                + ">/dev/null 2>&1 & "
+                + "else "
                 + "/system/bin/setsid /system/bin/app_process /system/bin com.xplay6.temproot.DevWarn \"$S\" "
-                + ">/dev/null 2>&1 & echo DEVWARN_STARTED";
+                + ">/dev/null 2>&1 & fi; "
+                + "echo DEVWARN_STARTED";
     }
 
     /** 开关的唯一落地入口：开 = 建哨兵并（重新）拉起 watcher；关 = 删哨兵，watcher
@@ -1491,6 +1503,9 @@ public final class Chain {
             log.line("开发模式警告: 哨兵写入失败: " + t);
             return false;
         }
+        // The fd-hygiene wrapper must exist before the watcher that uses it is
+        // spawned; staging is idempotent and cheap (skipped when already there).
+        Modules.stageNative(ctx, log, "closefds");
         String out = root(devWarnCommand(ctx));
         boolean ok = out != null && out.indexOf("DEVWARN_STARTED") >= 0;
         log.line("开发模式警告: " + (ok

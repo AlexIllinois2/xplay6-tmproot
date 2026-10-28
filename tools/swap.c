@@ -1,9 +1,20 @@
-/* tools/swap.c -- ask sud to put one file in front of a file inside a read-only tree
- * (MSWAP) or to undo that (UMSWAP).  Lab tool, not part of the delivery artifacts.
+/* tools/swap.c -- ask sud to swap ONE file inside a read-only tree (MSWAP), or
+ * undo that (UMSWAP).
  *
- * Run it THROUGH the root channel: sud attributes the caller from the kernel's own socket
- * bookkeeping, so a uid-2000 instance is refused by design, and only the daemon (init
- * domain) can mount over /system in the first place.
+ * Lab tool, not part of the delivery artifacts.
+ *
+ * WHY THIS USES relayd's TCP PORT:
+ *   sud refuses MSWAP for anybody whose uid is not 0 ("MSWAP is root-only"), and
+ *   it attributes a TCP caller by its socket row in /proc/net/tcp -- which is
+ *   relayd's row, and relayd is uid 0.  So a request that arrives over relayd
+ *   arrives as root, which is what MSWAP needs.
+ *   The peer channel cannot be used from here: it wants the CLIENT to bind an
+ *   abstract socket, and this tool runs in the init domain (through su), which
+ *   is not allowed to bind AF_UNIX at all (measured: "abstract bind: Operation
+ *   not permitted").
+ *   relayd appends " TOK=<token>" to the line it forwards; sud verifies it and
+ *   then strips it before parsing the line as a command, so the two arguments
+ *   here survive the trip.
  *
  * usage: swap <src-file> <dst-file>      # swap in
  *        swap -u <dst-file>              # undo (lazy umount of the mirrored directory)
@@ -35,8 +46,8 @@ int main(int argc, char **argv)
 	in.sin_family = AF_INET;
 	in.sin_port = htons(12346);
 	in.sin_addr.s_addr = htonl(0x7f000001);
-	if (connect(fd, (struct sockaddr *) &in, sizeof in) != 0) {
-		printf("connect 127.0.0.1:12346: %s (sud not listening?)\n", strerror(errno));
+	if (connect(fd, (struct sockaddr *)&in, sizeof in) != 0) {
+		printf("connect 127.0.0.1:12346: %s (relayd not listening?)\n", strerror(errno));
 		return 1;
 	}
 	if (!strcmp(argv[1], "-u"))

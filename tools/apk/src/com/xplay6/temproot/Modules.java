@@ -176,18 +176,36 @@ public final class Modules {
      *  root:root, run customize.sh the Magisk way (MODDIR=dest, UNZIPED=1; abort
      *  rolls the module dir back), then rebuild the mounts.  Returns the module
      *  display name for the toast. */
-    public static String install(Context ctx, Uri uri, Chain.Log log) throws Exception {
-        File cache = ctx.getCacheDir();
-        long ts = System.currentTimeMillis();
-        File zip = new File(cache, "module-" + ts + ".zip");
-        File stage = new File(cache, "stage-" + ts);
-        try {
-            InputStream in = ctx.getContentResolver().openInputStream(uri);
-            if (in == null)
-                throw new Exception("读不了所选文件（内容提供方返回 null）");
-            copy(in, new FileOutputStream(zip));
-            in.close();
+    /** Install the Magisk runtime module that ships inside the APK.
+     *
+     * The module is a normal Magisk-format zip (assets/magisk_runtime.zip),
+     * built by tools/build_magisk_module.sh.  It carries Magisk 30.7 plus the
+     * LD_PRELOAD shim that moves the daemon's socket into the abstract
+     * namespace -- this kernel refuses bind(2) on a filesystem AF_UNIX path.
+     *
+     * Installing it is the same operation as picking a zip through SAF, so
+     * the module ends up in /data/adb/modules/<id> with the same layout, the
+     * same module.prop and the same service.sh.  Afterwards the boot-time
+     * chain starts the daemon: modboot.sh service runs the module's
+     * service.sh, which creates the runtime directory and launches magiskd.
+     */
+    public static String installBundled(Context ctx, Chain.Log log) throws Exception {
+        File zip = new File(ctx.getCacheDir(), "magisk_runtime.zip");
+        if (!zip.exists()) {
+            try {
+                copy(ctx.getAssets().open("magisk_runtime.zip"), new FileOutputStream(zip));
+            } catch (java.io.IOException e) {
+                throw new Exception("读不出内置的 Magisk 模块: " + e.getMessage());
+            }
+        }
+        return installZip(ctx, zip, log);
+    }
 
+    /** Install a Magisk-format module zip from a local file. */
+    public static String installZip(Context ctx, File zip, Chain.Log log) throws Exception {
+        long ts = System.currentTimeMillis();
+        File stage = new File(ctx.getCacheDir(), "stage-" + ts);
+        try {
             stage.mkdirs();
             unzip(zip, stage, log);
 
@@ -241,6 +259,20 @@ public final class Modules {
             return p.name.isEmpty() ? p.id : p.name;
         } finally {
             delTree(stage);
+        }
+    }
+
+    /** Install a Magisk-format module zip picked through SAF. */
+    public static String install(Context ctx, Uri uri, Chain.Log log) throws Exception {
+        File zip = new File(ctx.getCacheDir(), "module-" + System.currentTimeMillis() + ".zip");
+        try {
+            InputStream in = ctx.getContentResolver().openInputStream(uri);
+            if (in == null)
+                throw new Exception("读不了所选文件（内容提供方返回 null）");
+            copy(in, new FileOutputStream(zip));
+            in.close();
+            return installZip(ctx, zip, log);
+        } finally {
             zip.delete();
         }
     }
@@ -355,7 +387,15 @@ public final class Modules {
     /** One boot-time pass, called by EscService once the root channel is up.
      *  Magisk order: module post-fs-data.sh + global post-fs-data.d synchronously,
      *  then the mount rebuild, then service.sh + service.d detached.  Everything
-     *  is best-effort: a broken module must never take the boot chain down. */
+     *  is best-effort: a broken module must never take the boot chain down.
+     *
+     *  On 7.1.1 the mount rebuild goes through sysoverlay, not modmount.sh:
+     *  modmount.sh mounts in the manager app's own mount namespace, where
+     *  nothing else can see it (measured: the manager app's mountinfo listed
+     *  the tmpfs while init's and every other app's did not).  sysoverlay
+     *  publishes in BOTH namespaces and applies the //system bypass, the
+     *  system_file labels and the shipped modes.  modmount.sh still runs,
+     *  because it is what the module scripts and the /data overlays use. */
     public static void bootRun(Context ctx) {
         try {
             ensureEngine(ctx, QLOG);
@@ -363,10 +403,89 @@ public final class Modules {
             Log.i(TAG, "boot postfs: " + p);
             String m = Chain.root("sh " + ENGINE_DIR + "/modmount.sh mount");
             Log.i(TAG, "boot mounts: " + m);
+            /* The /system overlay: one call per enabled module that has a
+             * system/ tree.  sysoverlay is a native binary, so it has to be
+             * staged from the assets first. */
+            File so = stageNative(ctx, QLOG, "sysoverlay");
+            if (so != null) {
+                /* The module directory is root-only (0700), so the app process
+                 * cannot list it -- the list has to come through the root
+                 * channel.  sysoverlay itself skips a module without a system/
+                 * tree, so no check is needed here. */
+                for (String id : moduleIdsOverRoot()) {
+                    String r = Chain.root(so.getAbsolutePath() + " '" + MODS + "/" + id
+                                          + "' " + SYSTEM_ROOT + " --init-ns");
+                    Log.i(TAG, "sysoverlay " + id + ": " + r);
+                }
+            }
             String s = Chain.root("sh " + ENGINE_DIR + "/modboot.sh service");
             Log.i(TAG, "boot service: " + s);
         } catch (Throwable t) {
             Log.i(TAG, "bootRun: " + t);
         }
+    }
+
+    /** The directory the overlay publishes into. */
+    private static final String SYSTEM_ROOT = "/system";
+
+    /** Copy a native binary out of the assets into our files dir and make it
+     *  executable.  The APK's own files dir is the only place we can exec
+     *  from on this ROM (SELinux will not let us run an ELF out of /data). */
+    static File stageNative(Context ctx, Chain.Log log, String name) {
+        File dst = new File(ctx.getFilesDir(), name);
+        try {
+            if (dst.exists() && dst.canExecute())
+                return dst;
+            InputStream in = ctx.getAssets().open(name);
+            OutputStream out = new FileOutputStream(dst);
+            byte[] buf = new byte[64 * 1024];
+            int n, total = 0;
+            while ((n = in.read(buf)) > 0) {
+                out.write(buf, 0, n);
+                total += n;
+            }
+            out.close();
+            in.close();
+            dst.setExecutable(true, false);
+            dst.setReadable(true, false);
+            log.line("staged native " + dst.getAbsolutePath() + " bytes=" + total
+                      + " canExec=" + dst.canExecute());
+            return dst;
+        } catch (Throwable t) {
+            log.line("stage native " + name + " failed: " + t);
+            return null;
+        }
+    }
+
+    /** The ids of the enabled modules, listed THROUGH the root channel.
+     *
+     *  /data/adb/modules is 0700 root, so the app process cannot read it --
+     *  the listing has to go through su.  Modules with a `disable` or
+     *  `remove` marker are skipped, as modmount.sh does. */
+    private static java.util.List<String> moduleIdsOverRoot() {
+        java.util.List<String> out = new java.util.ArrayList<String>();
+        String raw;
+
+        try {
+            raw = Chain.root("ls -1 " + MODS + " 2>/dev/null; "
+                             + "for d in " + MODS + "/*; do "
+                             + "  [ -d \"$d\" ] || continue; "
+                             + "  [ -f \"$d/disable\" ] && continue; "
+                             + "  [ -f \"$d/remove\" ] && continue; "
+                             + "  basename \"$d\"; "
+                             + "done");
+        } catch (Throwable t) {
+            Log.i(TAG, "module list failed: " + t);
+            return out;
+        }
+        if (raw == null)
+            return out;
+        for (String ln : raw.replace("\r", "").split("\n")) {
+            String id = ln.trim();
+            if (id.isEmpty() || id.startsWith(".") || id.contains("/"))
+                continue;
+            out.add(id);
+        }
+        return out;
     }
 }

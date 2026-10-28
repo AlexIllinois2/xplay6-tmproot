@@ -81,6 +81,31 @@ cp "$ROOT/broot7" "$A/assets/broot7"
 cp "$ROOT/clobber" "$A/assets/clobber"
 cp "$ROOT/nsmbind" "$A/assets/nsmbind"
 cp "$ROOT/relayd" "$A/assets/relayd"
+# The /system overlay engine for 7.1.1: it publishes a module's system/ tree
+# into /system in BOTH mount namespaces (init's and the manager app's), with the
+# //system bypass for vivo's mount hook and the system_file labels the shipped
+# files carry.  modmount.sh alone mounts only in the app's own namespace.
+cp "$ROOT/sysoverlay" "$A/assets/sysoverlay"
+
+# closefds: exec wrapper that drops the inherited /dev/binder fds before
+# exec'ing its argument.  The escalation ladder deliberately never closes its
+# binder fds (closing touches UAF-freed kernel state), so every process spawned
+# from the root channel inherits them all; long-lived children (DevWarn, module
+# daemons) must start through this wrapper or they carry the whole pile.
+cp "$ROOT/closefds" "$A/assets/closefds"
+
+# The Magisk runtime module: Magisk 30.7 packaged as a Magisk-format module,
+# plus the LD_PRELOAD shim that moves its daemon socket into the abstract
+# namespace (this kernel refuses bind(2) on a filesystem AF_UNIX path).
+# The module is shipped as a zip so the app can install it into
+# /data/adb/modules on demand.
+MAGISK_MOD="$ROOT/../build/magisk_runtime.zip"
+if [ -f "$MAGISK_MOD" ]; then
+	cp "$MAGISK_MOD" "$A/assets/magisk_runtime.zip"
+	echo "[2/6] bundled Magisk runtime module ($(stat -c %s "$MAGISK_MOD") bytes)"
+else
+	echo "[2/6] WARNING: $MAGISK_MOD missing -- run tools/build_magisk_module.sh" >&2
+fi
 
 echo "[3/6] package (manifest + assets)"
 "$BT/aapt" package -f -M "$A/AndroidManifest.xml" -A "$A/assets" -I "$PLAT" -F "$S/unsigned.apk"

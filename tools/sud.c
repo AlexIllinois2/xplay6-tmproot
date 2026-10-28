@@ -806,6 +806,21 @@ static int token_matches(const char *line, uid_t *uid_out)
     return 0;
 }
 
+/* Take the identity carrier back off the request line.  relayd appends
+ * " TOK=<token>" to whatever it forwards, so the line the daemon parses as a
+ * command carries it; the token proved who asked and has done its job by the
+ * time the line is dispatched, and leaving it there made it part of the
+ * command itself ("SU 0 id TOK=..." ran "id TOK=..."). */
+static void strip_token(char *line)
+{
+    char *t = strstr(line, " TOK=");
+
+    if (t == NULL)
+        t = strstr(line, "\tTOK=");
+    if (t != NULL)
+        *t = 0;
+}
+
 /* The rule lives in tools/grants_rule.h (shared with tools/grants_rule_test.c, which compiles the
  * same text the daemon ships with); this wrapper only adds the daemon's own log line. */
 static int grants_file_usable(const char *path, int owner_must_be_root)
@@ -871,6 +886,13 @@ static void handle_su(int fd)
             return;
         }
     }
+    /* The token is only an identity carrier: relayd appends it to the request
+     * line, so it must come back off before the line is parsed as a command.
+     * Left in place it became part of the command:
+     *   "SU 0 id TOK=..."      ran "id TOK=..."   (id complained about a user named TOK)
+     *   "MSWAP /src /dst TOK=..." made the destination "/dst TOK=..." and the swap failed
+     * So it is stripped unconditionally, whether or not it was what identified us. */
+    strip_token(line);
     dispatch_su(fd, cuid, cpid, line);
 }
 
@@ -1072,6 +1094,15 @@ static void import_caller_env(pid_t cpid)
 
 static void dispatch_su(int fd, int cuid, pid_t cpid, char *line)
 {
+    /* The token is only an identity carrier: relayd appends it to the request
+     * line, so it must come back off before the line is parsed as a command.
+     * Left in place it became part of the command:
+     *   "SU 0 id TOK=..."       ran "id TOK=..."  (id complained about a user named TOK)
+     *   "MSWAP /src /dst TOK=..." made the destination "/dst TOK=..." and the swap failed
+     * It is stripped here, at the one place every path goes through, so it does
+     * not matter which channel carried the request. */
+    strip_token(line);
+
     if (!uid_allowed(cuid)) {
         /* Denied without explaining anything: the whole point of this design is
          * that an unlisted app learns nothing about what is on the other end. */

@@ -245,6 +245,11 @@ static void serve_one(int c)
 			return;
 		}
 	}
+	/* The token travels with EVERY request: it is how sud attributes a caller whose
+	 * socket row it cannot see (an app's TCP row does not show up in the helper's
+	 * /proc/net/tcp view).  sud verifies it and then takes it back off the line
+	 * before the line is parsed as a command -- so a fixed argument shape
+	 * (MOUNT / MSWAP / UMSWAP) survives the trip. */
 	tf = fopen(g_token, "r");
 	if (tf) {
 		char t[128];
