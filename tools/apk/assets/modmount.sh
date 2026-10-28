@@ -120,6 +120,16 @@ do_mount() {
             for m in $MODLIST; do
                 [ -d "$MODS/$m/system$a" ] && cp -a "$MODS/$m/system$a/." "$T/" 2>>"$LOG"
             done
+            # A bind mount keeps the SOURCE inode's label, and toybox cp -a does
+            # NOT preserve SELinux contexts -- every file in $T carries the
+            # tmpfs default label (init_tmpfs) instead of system_file.  A domain
+            # that may read system_file but not init_tmpfs (mediacodec) then
+            # gets EACCES on the whole anchor: measured 2026-10-28, hw_get_module
+            # ("gralloc") failed silently in every access() and media.codec
+            # dereferenced the garbage module pointer and died at addr 0x4 --
+            # which is how scrcpy/screenrecord lost every hardware encoder.
+            # Relabel the snapshot BEFORE the bind; -h keeps symlinks intact.
+            chcon -Rh u:object_r:system_file:s0 "$T" 2>>"$LOG" || log "WARN chcon $a rc=$?"
             if mount --bind "$T" "//system$a" 2>>"$LOG"; then
                 echo "A|/system$a|$T" >> "$BINDS"
                 log "anchor mounted: //system$a <- $T"
