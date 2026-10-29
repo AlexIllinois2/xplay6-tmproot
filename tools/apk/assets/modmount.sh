@@ -114,6 +114,23 @@ do_mount() {
             return 1
         fi
         for a in $ANCLIST; do
+            # NEVER snapshot /system/lib or /system/lib64.
+            # A tmpfs copy of these dirs gives libc.so (and every other .so) a
+            # new inode.  Zygote has already loaded libc.so from dm-0; when an
+            # app later dlopens a .so from this snapshot whose DT_NEEDED names
+            # libc.so, the linker resolves it to the snapshot copy (different
+            # inode), loads a SECOND libc, and __libc_preinit segfaults
+            # (SEGV_ACCERR in __libc_init_globals).  Measured 2026-10-28: every
+            # app that touched gralloc.msm8996.so crashed on launch.
+            # New files directly under /system/lib cannot be added by this
+            # engine; subdirs (e.g. /system/lib/soundfx) are safe and still
+            # snapshotted because they do not contain libc.so.
+            case "$a" in
+                /lib|/lib64)
+                    log "WARN: skipping anchor //system$a to avoid libc dedup crash (new files under /system/lib are not supported)"
+                    continue
+                    ;;
+            esac
             T="$MNT/sys$a"
             mkdir -p "$T"
             cp -a "/system$a/." "$T/" 2>>"$LOG" || log "WARN snapshot $a rc=$?"
