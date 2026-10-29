@@ -346,6 +346,19 @@ static void overlay(const char *mod_root, const char *target_root, const char *r
 		if (lstat(src, &sst) != 0)
 			continue;
 		if (S_ISDIR(sst.st_mode)) {
+			/* NEVER publish /system/lib or /system/lib64.
+			 * A tmpfs overlay here gives libc.so a new inode.  Zygote has
+			 * already loaded libc from dm-0; when an app later dlopens
+			 * gralloc.msm8996.so (or any .so with DT_NEEDED libc.so) from
+			 * the tmpfs copy, the linker resolves libc to the snapshot
+			 * copy (different inode) and loads a SECOND libc, which
+			 * crashes __libc_init_globals with SEGV_ACCERR.  Subdirs
+			 * (e.g. /system/lib/soundfx) are safe and still publishable,
+			 * because they do not contain libc.so. */
+			if (!strcmp(target, "/system/lib") || !strcmp(target, "/system/lib64")) {
+				lg("  SKIP %s (libc dedup crash risk)\n", target);
+				continue;
+			}
 			/* The directory itself has to become writable before a
 			 * file inside it can be published. */
 			if (publish_dir(target) != 0) {
