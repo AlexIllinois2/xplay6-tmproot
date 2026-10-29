@@ -434,27 +434,60 @@ public final class Modules {
     static File stageNative(Context ctx, Chain.Log log, String name) {
         File dst = new File(ctx.getFilesDir(), name);
         try {
-            if (dst.exists() && dst.canExecute())
-                return dst;
+            /* Freshness, not existence: a cached binary from an older APK must
+             * be replaced when the asset changed.  Measured 2026-10-29: the
+             * sysoverlay fix for /system/lib sat in assets while files/ kept
+             * running the pre-fix binary -- every boot re-published /system/lib
+             * and crashed every app, because this check only looked at
+             * existence.  Compare content hashes, not timestamps. */
+            String cached = dst.canExecute() ? fileMd5(dst) : null;
             InputStream in = ctx.getAssets().open(name);
+            java.security.MessageDigest md = java.security.MessageDigest.getInstance("MD5");
             OutputStream out = new FileOutputStream(dst);
             byte[] buf = new byte[64 * 1024];
             int n, total = 0;
             while ((n = in.read(buf)) > 0) {
                 out.write(buf, 0, n);
+                md.update(buf, 0, n);
                 total += n;
             }
             out.close();
             in.close();
             dst.setExecutable(true, false);
             dst.setReadable(true, false);
+            String fresh = hex(md.digest());
             log.line("staged native " + dst.getAbsolutePath() + " bytes=" + total
-                      + " canExec=" + dst.canExecute());
+                      + " canExec=" + dst.canExecute()
+                      + (cached == null ? " (first stage)"
+                         : cached.equals(fresh) ? " (unchanged)" : " (REPLACED, was " + cached + ")"));
             return dst;
         } catch (Throwable t) {
             log.line("stage native " + name + " failed: " + t);
             return null;
         }
+    }
+
+    /** MD5 of a file's contents, hex-encoded; null when unreadable. */
+    private static String fileMd5(File f) {
+        try {
+            java.security.MessageDigest md = java.security.MessageDigest.getInstance("MD5");
+            InputStream in = new FileInputStream(f);
+            byte[] buf = new byte[64 * 1024];
+            int n;
+            while ((n = in.read(buf)) > 0)
+                md.update(buf, 0, n);
+            in.close();
+            return hex(md.digest());
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    private static String hex(byte[] b) {
+        StringBuilder sb = new StringBuilder(b.length * 2);
+        for (byte x : b)
+            sb.append(String.format("%02x", x));
+        return sb.toString();
     }
 
     /** The ids of the enabled modules, listed THROUGH the root channel.
