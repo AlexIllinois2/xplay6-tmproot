@@ -1226,6 +1226,20 @@ public final class Main extends Activity {
         sec4.addView(settingRow(-1, "适用设备", null, "Xplay6 / PD1610", Ui.TEXT, false, null));
         sec4.addView(divider());
         sec4.addView(settingRow(-1, "系统版本支持", null, "1.15.1 · 7.12.15 · 8.19.16", Ui.TEXT, false, null));
+        sec4.addView(divider());
+        sec4.addView(settingRow(Ui.INFO, "项目源码",
+                "https://github.com/AlexIllinois2/xplay6-tmproot",
+                null, Ui.TEXT, true, new Runnable() {
+                    @Override
+                    public void run() {
+                        try {
+                            startActivity(new Intent(Intent.ACTION_VIEW,
+                                    Uri.parse("https://github.com/AlexIllinois2/xplay6-tmproot")));
+                        } catch (Exception ignored) {
+                            Toast.makeText(Main.this, "没有可用的浏览器", Toast.LENGTH_SHORT).show();
+                        }
+                    }
+                }));
         col.addView(sec4, cardLp());
 
         TextView support = u.text("系统版本支持列表\n"

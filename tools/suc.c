@@ -48,6 +48,14 @@ static int tcp_channel(void)
     return -1;
 }
 
+/* Channel kinds, so the caller knows which transports carry an attributable
+ * identity.  On the unix sockets the daemon reads SO_PEERCRED and our uid is
+ * kernel-given; on TCP the daemon's /proc/net/tcp view cannot see our row at
+ * all (different network namespace view), so the request needs either a TOK=
+ * (which only relayd appends) or the peer hand-off below. */
+#define CH_UNIX 1
+#define CH_TCP 2
+
 /* Reverse-direction channel: WE listen, the daemon connects.  This is the only
  * shape that works on this device -- the daemon's domain cannot bind AF_UNIX and
  * cannot see our TCP row -- and it is also the strongest: the request travels
@@ -144,7 +152,7 @@ static int peer_channel(const char *req, int timeout_ms)
     return csock;
 }
 
-static int open_channel(void)
+static int open_channel(int *kind)
 {
     const char *files[2] = { "/dev/.sud/sud.sock", "/data/local/tmp/.sud/sud.sock" };
     int i, fd;
@@ -160,18 +168,27 @@ static int open_channel(void)
         if (i == 0) {
             a.sun_path[0] = 0;
             memcpy(a.sun_path + 1, "sud", 3);
-            if (connect(fd, (struct sockaddr *) &a, sizeof(a.sun_family) + 1 + 3) == 0)
+            if (connect(fd, (struct sockaddr *) &a, sizeof(a.sun_family) + 1 + 3) == 0) {
+                if (kind != NULL)
+                    *kind = CH_UNIX;
                 return fd;
+            }
         } else {
             strncpy(a.sun_path, files[i - 1], sizeof a.sun_path - 1);
-            if (connect(fd, (struct sockaddr *) &a, sizeof a) == 0)
+            if (connect(fd, (struct sockaddr *) &a, sizeof a) == 0) {
+                if (kind != NULL)
+                    *kind = CH_UNIX;
                 return fd;
+            }
         }
         close(fd);
     }
     fd = tcp_channel();
-    if (fd >= 0)
+    if (fd >= 0) {
+        if (kind != NULL)
+            *kind = CH_TCP;
         return fd;
+    }
     fprintf(stderr, "su: no sud channel (%s) -- escalate first (is SELinux permissive?)\n",
             strerror(errno));
     return -1;
@@ -267,7 +284,7 @@ int main(int argc, char **argv)
 {
     char req[4200], out[8192];
     struct pollfd pf[2];
-    int fd, uid = 0, i, interactive = 0;
+    int fd, uid = 0, i, interactive = 0, chan = 0;
     const char *cmd = NULL;
 
     /* Diagnostic: `sux --rawexec <path> [args...]` calls execve through the raw
@@ -311,7 +328,7 @@ int main(int argc, char **argv)
      * what pushed Snub's foreground services past their 5 s startForeground deadline). */
     int req_sent = 0;
 
-    fd = open_channel();
+    fd = open_channel(&chan);
     if (fd < 0) {
         fd = peer_channel(req, 1500);
         if (fd >= 0)
@@ -322,6 +339,36 @@ int main(int argc, char **argv)
     if (!req_sent && write(fd, req, strlen(req)) < 0) {
         fprintf(stderr, "su: write request: %s\n", strerror(errno));
         return 127;
+    }
+    /* A TCP caller has no attributable identity on the daemon's side: its socket
+     * row is invisible there and only relayd callers carry a TOK.  When the
+     * daemon answers with its attribution error, redo the request over the peer
+     * hand-off, whose SCM_CREDENTIALS carry our uid straight from the kernel.
+     * The peek never blocks a working call: the daemon answers an unattributable
+     * request at once, so a short receive timeout covers the whole error path,
+     * and a normal run's first output simply arrives later than the timeout --
+     * nothing is consumed (MSG_PEEK), so the relay loop below reads it as usual. */
+    if (!req_sent && chan == CH_TCP) {
+        char probe[80];
+        struct timeval tv;
+        ssize_t pn;
+
+        tv.tv_sec = 0;
+        tv.tv_usec = 500 * 1000;
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+        pn = recv(fd, probe, sizeof probe - 1, MSG_PEEK);
+        tv.tv_usec = 0;
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+        if (pn > 0) {
+            probe[pn] = 0;
+            if (strncmp(probe, "ERR cannot attribute caller", 27) == 0) {
+                close(fd);
+                fd = peer_channel(req, 2000);
+                if (fd < 0)
+                    return 127;
+                req_sent = 1;
+            }
+        }
     }
 
     /* two-way relay until either side closes; stdin is only a poll participant in
