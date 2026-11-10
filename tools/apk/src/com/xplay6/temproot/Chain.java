@@ -1035,6 +1035,15 @@ public final class Chain {
             r.close();
             return out;
         } catch (java.io.FileNotFoundException e) {
+            /* Java 在 EACCES（没有读权限）时抛的也是 FileNotFoundException，而 root 侧工具
+             * 恰好会把名单写成 0600 root:root（已测形态）。把"在但读不了"折叠成"空名单"
+             * 是授权表被整表清掉的那条路：所有"读不了就拒绝重写"的保险都盯的是 null。
+             * 所以这里必须区分：文件不在才是空，在而读不了是 null。 */
+            if (g.exists()) {
+                lastGrantsError = "exists but unreadable (canRead=" + g.canRead()
+                        + ") -- root-owned? " + g.getAbsolutePath() + ": " + e;
+                return null;
+            }
             return out;
         } catch (Throwable t) {
             lastGrantsError = "read " + g.getAbsolutePath() + ": " + t;
@@ -1139,20 +1148,43 @@ public final class Chain {
         }
     }
 
+    /** 名单在但本 app 读不了（root 侧写成 0600 root:root 的已测形态）：借 root 通道把所有权
+     *  chown 回本 app。文件内容一个字节都不改 —— 修的是属主，不是名单。返回修复后是否可读。 */
+    public static boolean repairGrantsReadable(Context ctx, Log log) {
+        File g = grantsFile(ctx);
+        if (!g.exists())
+            return false;
+        if (g.canRead())
+            return true;
+        int me = android.os.Process.myUid();
+        String p = g.getAbsolutePath();
+        String out = root("chown " + me + ":" + me + " '" + p + "' && chmod 600 '" + p
+                + "' && echo GRANTS_RESEALED");
+        boolean ok = out != null && out.indexOf("GRANTS_RESEALED") >= 0 && g.canRead();
+        if (log != null)
+            log.line("grants: " + p + " 读不了 -> root 侧 chown 修复 "
+                    + (ok ? "成功" : "失败: " + (out == null ? "null" : trim1(out))));
+        return ok;
+    }
+
     /** Our own uid has to be in the list or the manager cannot use its own service. */
     public static void selfGrant(Context ctx, Log log) {
         int me = android.os.Process.myUid();
         File existing = grantsFile(ctx);
         if (existing.exists() && !existing.canRead()) {
-            /* The list is written by root on the recovery path, so it is often root-owned 0600 and
-             * this app cannot read it.  Rewriting it anyway would silently drop every uid the OWNER
-             * put there -- measured on 2026-10-20, where a chain run cleared Shizuku (10133) and
-             * snub (10135) out of the allow list.  Leave the file alone instead: the daemon reads it
-             * as root, our own uid is in it by construction, and "cannot manage the list this run"
-             * is far cheaper than "deleted the user's configuration". */
-            log.line("self-grant uid=" + me + " skipped: the list exists but is not readable by us"
-                    + " (root-owned?) -- NOT rewriting, that would discard the owner's entries");
-            return;
+            /* 名单在但这个 uid 读不了（root 侧写成的 0600 root:root）：root 通道活着就先把
+             * 所有权还给本 app 再走正常流程；修不回来才按老规矩拒绝，绝不带着看不见的名单写。 */
+            if (repairGrantsReadable(ctx, log)) {
+                log.line("self-grant: 名单所有权已修回，继续正常 reseal");
+            } else {
+                /* Rewriting it anyway would silently drop every uid the OWNER put there -- measured
+                 * on 2026-10-20, where a chain run cleared Shizuku (10133) and snub (10135). Leave
+                 * the file alone instead: "cannot manage the list this run" is far cheaper than
+                 * "deleted the user's configuration". */
+                log.line("self-grant uid=" + me + " skipped: the list exists but is not readable by us"
+                        + " and the root channel could not repair it -- NOT rewriting");
+                return;
+            }
         }
         List<String> g = readGrantTokensOrNull(ctx);
         if (g == null) {
@@ -1771,6 +1803,13 @@ public final class Chain {
         List<Entry> out = new ArrayList<Chain.Entry>();
         PackageManager pm = ctx.getPackageManager();
         List<String> grants = readGrantTokensOrNull(ctx);
+        if (grants == null) {
+            /* 名单在但读不了：能借 root 通道就把所有权修回来再读一次。修不回来只能把本页
+             * 显示成"没有已知授权"——但 saveSelection 会拒绝按这份镜像重写，所以这里看到的
+             * 错不会顺着下一次点击变成真丢。 */
+            repairGrantsReadable(ctx, null);
+            grants = readGrantTokensOrNull(ctx);
+        }
         if (grants == null)
             grants = new ArrayList<String>();
         try {

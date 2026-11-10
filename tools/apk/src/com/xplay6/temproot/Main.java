@@ -1828,6 +1828,19 @@ public final class Main extends Activity {
         heroDetail.setText("SELinux " + seLong + " · su " + (onPath ? "在 PATH" : "不在 PATH") + channel);
         statSe.setText(se);
         statSu.setText(onPath ? "在 PATH" : "不在 PATH");
+
+        /* 「隐藏开发模式警告」的开关存的是"要"（files/devwarn），watcher 是"在"——进程会死，
+         * 重启后要等提权成功才被 Chain.run 拉起，而 UI 只看文件就显示开。所以每次确认 root
+         * 可用都按存储的选择补拉一次：幂等（DevWarn 的抽象 socket 单实例锁，重复拉起的会
+         * 自己退出），已经活着就只是白花一次 shell。开关存的是关时不做任何事。 */
+        if (rooted && Chain.devWarnChoice(this)) {
+            new Thread(new Runnable() {
+                @Override
+                public void run() {
+                    Chain.applyDevWarnChoice(Main.this, logger);
+                }
+            }).start();
+        }
     }
 
     private void updateHomeStats() {
