@@ -407,12 +407,20 @@ public final class Chain {
               + "| /system/bin/toybox tr -d '\\r\\n ')\n"
               + "[ -n \"$tok\" ] && [ \"$tok\" = \"$want\" ] || { echo 'REFUSED token'; exit 0; }\n"
               + "case \"$line\" in\n"
-              + "  SU\\ *) rest=${line#SU } ;;\n"
+              + "  SUX\\ *) rest=${line#SUX }; enc=1 ;;\n"
+              + "  SU\\ *) rest=${line#SU }; enc=0 ;;\n"
               + "  *) echo 'REFUSED unsupported'; exit 0 ;;\n"
               + "esac\n"
               + "uid=${rest%% *}\n"
               + "if [ \"$uid\" = \"$rest\" ]; then cmd=; else cmd=${rest#* }; fi\n"
               + "[ \"$uid\" = 0 ] || { echo 'REFUSED uid'; exit 0; }\n"
+              /* SUX carries the command base64-encoded so a multi-line script survives the
+               * one-line protocol.  Before this the daemon executed only the first line of
+               * every `su -c` heredoc/script and returned success. */
+              + "if [ \"$enc\" = 1 ]; then\n"
+              + "  cmd=$(printf '%s' \"$cmd\" | /system/bin/toybox base64 -d 2>/dev/null) "
+              + "|| { echo 'REFUSED encoding'; exit 0; }\n"
+              + "fi\n"
               + "mkdir -p /data/local/tmp/.sud 2>/dev/null\n"
               + "printf '%s SU 0 %s\\n' \"$(/system/bin/toybox date +%H:%M:%S)\" \"$cmd\" "
               + ">> \"$LOG\" 2>/dev/null\n"
@@ -487,16 +495,26 @@ public final class Chain {
         }
     }
 
-    /** Put a client on PATH the way sud's MOUNT does, but from a shell, because route 8 has no
-     *  daemon that can do it: /sbin is read-only rootfs, so every entry is bind-mounted into a
-     *  mirror under /data, the client is added under both names, and the mirror is bound over
-     *  /sbin.  The kernel helper runs in PID 1's mount namespace, which is the one apps see
-     *  (route 7 needed setns only because its daemon was the isolated one).
-     *  Name gate: esc8's step 2 patches the 8.1 checker (0xffffffc0001cb3cc -> `mov w0,#0;
-     *  ret`), so the literal name `su` and `sux` are both delivered here and both work --
-     *  measured as uid 2000: a real file named `su` returns 42 after the patch.  On a boot
-     *  where some su exec already happened before the patch the I-cache keeps the old code,
-     *  so `sux` remains a fallback.  Nothing is written to a partition. */
+    /** Put the client at every path a root app scans, the way Magisk does: /system/bin,
+     *  /system/xbin and /sbin are read-only, so each directory is mirrored under /data by
+     *  bind-mounting every entry, the client is added, and the mirror is bound over the
+     *  original.  Route 8's helper runs in PID 1's mount namespace, which is the one apps
+     *  see (route 7 needed setns only because its daemon was the isolated one).
+     *
+     *  Three shapes matter and each was missing before this:
+     *   - a bare `su` in /system/bin and /system/xbin: detectors hardcode those paths,
+     *     and PATH-only delivery made them report "no root";
+     *   - the delivered name is a tiny /system/bin/sh wrapper that execs `.su-client`.
+     *     A 32-bit app cannot exec the arm64 client directly (ENOEXEC), but it can exec
+     *     the 64-bit interpreter with the script, which then runs the 64-bit client --
+     *     one delivery now serves both ABIs;
+     *   - our tmpfs inodes are labelled system_file so an appdomain exec still works if
+     *     the route is enforcing instead of globally permissive.
+     *
+     *  Name gate: esc8's step 2 patches the 8.1 checker, so `su` and `sux` are both
+     *  delivered.  On a boot where some su exec happened before the patch the I-cache
+     *  keeps the old code, so `sux` remains the fallback name.  Nothing is written to a
+     *  partition. */
     private static void openSuName8(Context ctx, Log log) {
         File su = stage(ctx, log, "su");
         if (su == null) {
@@ -506,39 +524,72 @@ public final class Chain {
         File m = new File(ctx.getFilesDir(), "mirror8.sh");
         String script =
                 "#!/system/bin/sh\n"
-              + "PATH=/system/bin:/system/xbin:/sbin\n"
+              + "PATH=/system/bin:/system/xbin:/sbin:/vendor/bin\n"
               + "T=/system/bin/toybox\n"
               + "R=/data/local/tmp/.sur8\n"
-              /* A second chain run in the same boot must not build a mirror from the mirror: the
-               * marker is only reachable through OUR bind, so its presence means /sbin already is
-               * this mirror. */
-              + "[ -f /sbin/.r8mirror ] && { echo 'MIRROR8 already active'; exit 0; }\n"
-              + "rm -rf \"$R\"; mkdir -p \"$R\" || exit 1\n"
-              + "for f in /sbin/*; do\n"
-              + "  [ -e \"$f\" ] || continue\n"
-              + "  n=${f##*/}\n"
-              /* Never inherit a `su`/`sux` from whatever currently sits on /sbin: those names are
+              + "SUC=\"" + su.getAbsolutePath() + "\"\n"
+              /* A second chain run in the same boot must not rebuild from a mirror.  The marker is
+               * only reachable through OUR bind at the target path (it disappears on reboot), and it
+               * is versioned so an old build's /sbin-only mirror gets the new paths added instead of
+               * short-circuiting this one. */
+              + "[ -f /sbin/.r8mirror3 ] && [ -f /system/bin/.r8mirror3 ] "
+              + "&& { echo 'MIRROR8 already active'; exit 0; }\n"
+              /* Never rm -rf this tree: a previous attempt that bound /system/bin but failed on
+               * /sbin leaves live mounts inside it, and rebuilding over them would mirror the mirror. */
+              + "mkdir -p \"$R\" || exit 1\n"
+              + "stage_dir() {\n"
+              + "  d=$1\n"
+              + "  [ -d \"$d\" ] || return 0\n"
+              + "  [ -f \"$d/.r8mirror3\" ] && { echo \"MIRROR8 already: $d\"; return 0; }\n"
+              + "  r=$R/$(printf '%s' \"$d\" | $T tr '/' '_')\n"
+              + "  mkdir -p \"$r\" || return 0\n"
+              + "  chmod 0755 \"$r\" 2>/dev/null\n"
+              + "  for f in \"$d\"/*; do\n"
+              + "    [ -e \"$f\" ] || continue\n"
+              + "    n=${f##*/}\n"
+              /* Never inherit a `su`/`sux` from whatever currently sits there: those names are
                * exactly what we deliver, and an older placeholder would shadow our client. */
-              + "  case \"$n\" in su|sux) continue;; esac\n"
-              + "  if [ -d \"$f\" ]; then\n"
-              + "    mkdir -p \"$R/$n\"; $T mount --bind \"$f\" \"$R/$n\" 2>/dev/null; continue\n"
-              + "  fi\n"
-              + "  : > \"$R/$n\" || continue\n"
-              + "  $T mount --bind \"$f\" \"$R/$n\" 2>/dev/null "
-              + "|| { rm -f \"$R/$n\"; cp -p \"$f\" \"$R/$n\" 2>/dev/null; }\n"
-              + "done\n"
-              + ": > \"$R/.r8mirror\"\n"
-              + "cp \"" + su.getAbsolutePath() + "\" \"$R/su\" || exit 1\n"
-              + "cp \"" + su.getAbsolutePath() + "\" \"$R/sux\" || exit 1\n"
-              + "chmod 0755 \"$R/su\" \"$R/sux\"\n"
-              + "$T mount --bind \"$R\" /sbin || exit 1\n"
-              + "echo MIRROR8 ok\n"
-              + "ls -l /sbin/su /sbin/sux 2>&1\n";
+              + "    case \"$n\" in su|sux|.su-client|.r8mirror|.r8mirror3) continue;; esac\n"
+              + "    if [ -d \"$f\" ]; then\n"
+              + "      mkdir -p \"$r/$n\"; $T mount --bind \"$f\" \"$r/$n\" 2>/dev/null; continue\n"
+              + "    fi\n"
+              + "    : > \"$r/$n\" || continue\n"
+              + "    $T mount --bind \"$f\" \"$r/$n\" 2>/dev/null "
+              + "|| { rm -f \"$r/$n\"; cp -p \"$f\" \"$r/$n\" 2>/dev/null; }\n"
+              + "  done\n"
+              + "  cp \"$SUC\" \"$r/.su-client\" || return 1\n"
+              + "  chmod 0755 \"$r/.su-client\"\n"
+              /* $d is the path the app will use, so the wrapper needs no PATH lookup and no
+               * knowledge of which mirror copy it belongs to. */
+              + "  printf '#!/system/bin/sh\\nexec %s/.su-client \"$@\"\\n' \"$d\" > \"$r/su\" || return 1\n"
+              + "  cp \"$r/su\" \"$r/sux\"\n"
+              + "  chmod 0755 \"$r/su\" \"$r/sux\"\n"
+              + "  : > \"$r/.r8mirror3\"\n"
+              /* Only our own tmpfs inodes are relabelled.  Every other entry is a bind of the
+               * original file, whose label is already correct and must not be touched. */
+              + "  $T chcon u:object_r:system_file:s0 \"$r\" \"$r/su\" \"$r/sux\" "
+              + "\"$r/.su-client\" \"$r/.r8mirror3\" 2>/dev/null\n"
+              /* vivo's mount hook refuses a target STRING that starts with /system, /oem or
+               * /apps; a leading // gets the same path past the string check (modmount.sh). */
+              + "  case \"$d\" in\n"
+              + "    /system*|/vendor*|/oem*|/apps*) tgt=\"/$d\" ;;\n"
+              + "    *) tgt=$d ;;\n"
+              + "  esac\n"
+              + "  $T mount --bind \"$r\" \"$tgt\" || { echo \"MIRROR8 bind failed: $d\"; return 1; }\n"
+              + "  echo \"MIRROR8 ok: $d\"\n"
+              + "}\n"
+              + "stage_dir /system/bin\n"
+              + "stage_dir /system/xbin\n"
+              + "stage_dir /sbin\n"
+              + "ls -l /system/bin/su /system/xbin/su /sbin/su 2>&1\n"
+              + "printf 'su -v: '; su -v 2>&1\n"
+              + "printf 'su -V: '; su -V 2>&1\n";
         if (!writeScript(log, m, script))
             return;
-        log.line("  mirror /sbin: " + trim1(root("sh " + m.getAbsolutePath())));
+        log.line("  mirror su paths: " + trim1(root("sh " + m.getAbsolutePath())));
         log.line("  PATH witness: " + trim1(root(
-                "sh -c 'command -v sux; command -v su; ls -l /sbin/sux 2>&1 | tail -1'")));
+                "sh -c 'command -v su; command -v sux; ls -l /system/bin/su /system/xbin/su "
+                + "/sbin/su 2>&1 | tail -3; su -v'")));
         log.line("  note: esc8 patched the name gate, so granted apps can call `su` (sux kept "
                 + "as fallback for boots where `su` ran before the patch)");
     }
@@ -650,6 +701,23 @@ public final class Chain {
                  * (art/ledger-20261016.md 634-635). The name gate admits su/sux/su7x. */
                 + "/data/local/tmp/nsmbind7 /data/local/tmp/su7x /sbin su,sux 1"));
         log.line("  nsmbind: " + out);
+        /* The same client belongs in every place an app scans for su, not just /sbin.
+         * /system/xbin on the official 7.1.1 is a tmpfs the ROM itself mounts there, so a plain
+         * copy works and lives exactly as long as the rest of this route.  /system/bin is on the
+         * read-only dm-0, where this kernel refuses EVERY mount -- bind and tmpfs both return
+         * EPERM with no avc line (measured 2026-11-09) -- so nsmbind is the only delivery left
+         * there, and it now aborts instead of overlaying when one entry cannot be reproduced. */
+        String xbin = trim1(root("sh -c 'cp /data/local/tmp/su7x /system/xbin/su && "
+                + "cp /data/local/tmp/su7x /system/xbin/sux && "
+                + "chmod 755 /system/xbin/su /system/xbin/sux && echo copied'"));
+        log.line("  /system/xbin: " + xbin);
+        if (!"copied".equals(xbin))
+            log.line("  nsmbind /system/xbin: " + trim1(root(
+                    "/data/local/tmp/nsmbind7 /data/local/tmp/su7x /system/xbin su,sux 1")));
+        String binprobe = trim1(root("sh -c '[ -x /system/bin/su ] && echo present'"));
+        if (!"present".equals(binprobe))
+            log.line("  nsmbind /system/bin: " + trim1(root(
+                    "/data/local/tmp/nsmbind7 /data/local/tmp/su7x /system/bin su,sux 1")));
         log.line("  PATH witness: " + trim1(root("sh -c 'ls -ld /sbin; ls -lZ /sbin/sux | tail -1'")));
         if (sg.startsWith("rc=0") && !execAllowed(su, log)) {
             /* The write reported success but the exec still refuses: the word did not land where
@@ -946,38 +1014,85 @@ public final class Chain {
         return g == null ? new ArrayList<Integer>() : g;
     }
 
+    /** The list as raw lines.  A line is either a plain uid (the original shape) or
+     *  "pkg &lt;package&gt;".  Keeping the raw text is what lets a rewrite preserve package
+     *  grants it does not understand -- the old parser threw those lines away, and the
+     *  next toggle silently revoked apps the user had granted. */
+    public static List<String> readGrantTokensOrNull(Context ctx) {
+        List<String> out = new ArrayList<String>();
+        File g = grantsFile(ctx);
+        lastGrantsError = "-";
+        try {
+            java.io.BufferedReader r = new java.io.BufferedReader(
+                    new java.io.InputStreamReader(new java.io.FileInputStream(g), "UTF-8"));
+            String line;
+            while ((line = r.readLine()) != null) {
+                line = line.trim();
+                if (line.length() == 0 || line.startsWith("#"))
+                    continue;
+                out.add(line);
+            }
+            r.close();
+            return out;
+        } catch (java.io.FileNotFoundException e) {
+            return out;
+        } catch (Throwable t) {
+            lastGrantsError = "read " + g.getAbsolutePath() + ": " + t;
+            return null;
+        }
+    }
+
+    /** uid carried by a grant line, or -1 for a package line. */
+    private static int tokenUid(String line) {
+        String s = line;
+        if (s.startsWith("uid "))
+            s = s.substring(4).trim();
+        try {
+            return Integer.parseInt(s);
+        } catch (NumberFormatException e) {
+            return -1;
+        }
+    }
+
+    /** package carried by a grant line, or null for a uid line. */
+    private static String tokenPkg(String line) {
+        if (line.startsWith("pkg ") || line.startsWith("pkg="))
+            return line.substring(4).trim();
+        return null;
+    }
+
+    private static boolean tokensContainUid(List<String> tokens, int uid) {
+        for (String t : tokens)
+            if (tokenUid(t) == uid)
+                return true;
+        return false;
+    }
+
+    private static boolean tokensContainPkg(List<String> tokens, String pkg) {
+        for (String t : tokens) {
+            String p = tokenPkg(t);
+            if (p != null && p.equals(pkg))
+                return true;
+        }
+        return false;
+    }
+
     /** The list, or NULL when the file is there but this uid could not read it.  The distinction is
      *  the whole point: an empty list is a state we may write, "could not see it" is not -- rewriting
      *  after a failed read is exactly how Shizuku (10133) and snub (10135) once vanished from the
      *  owner's allow list (ledger 670), and on the boot path the only thing that saved the list was
      *  that the write then failed for reasons we do not yet have an errno for. */
     public static List<Integer> readGrantsOrNull(Context ctx) {
-        List<Integer> out = new ArrayList<Integer>();
-        File g = grantsFile(ctx);
-        lastGrantsError = "-";
-        try {
-            InputStream in = new java.io.FileInputStream(g);
-            byte[] b = new byte[8192];
-            int n = in.read(b);
-            in.close();
-            String s = new String(b, 0, Math.max(n, 0), "UTF-8");
-            for (String line : s.split("\\s+")) {
-                if (line.length() == 0)
-                    continue;
-                try {
-                    out.add(Integer.valueOf(line.trim()));
-                } catch (NumberFormatException e) {
-                    /* a comment or a stray line: ignored on purpose */
-                }
-            }
-            return out;
-        } catch (java.io.FileNotFoundException e) {
-            /* no file yet -- legitimately empty, and writing the first entry is what we are for */
-            return out;
-        } catch (Throwable t) {
-            lastGrantsError = "read " + g.getAbsolutePath() + ": " + t;
+        List<String> tokens = readGrantTokensOrNull(ctx);
+        if (tokens == null)
             return null;
+        List<Integer> out = new ArrayList<Integer>();
+        for (String t : tokens) {
+            int u = tokenUid(t);
+            if (u >= 0)
+                out.add(Integer.valueOf(u));
         }
+        return out;
     }
 
     /** Why the last readGrants/writeGrants did not do what it was asked, or "-" when it did.
@@ -986,14 +1101,21 @@ public final class Chain {
     public static String lastGrantsError = "-";
 
     public static boolean writeGrants(Context ctx, List<Integer> uids) {
-        StringBuilder sb = new StringBuilder();
+        List<String> tokens = new ArrayList<String>();
         for (Integer u : uids)
-            sb.append(u.intValue()).append('\n');
+            tokens.add(String.valueOf(u.intValue()));
+        return writeGrantTokens(ctx, tokens);
+    }
+
+    /** Write raw grant lines.  Delete first: opening an existing file keeps whoever-owned
+     *  inode and its mode, and a list that strangers can write is one the daemon will not
+     *  read at all (sud.c grants_file_usable). */
+    public static boolean writeGrantTokens(Context ctx, List<String> tokens) {
+        StringBuilder sb = new StringBuilder();
+        for (String t : tokens)
+            if (t != null && t.trim().length() > 0)
+                sb.append(t.trim()).append('\n');
         try {
-            /* Delete first: opening an existing file keeps whoever-owned inode and its mode, and a
-             * list that strangers can write is one the daemon will not read at all
-             * (sud.c grants_file_usable).  A fresh inode is ours, and the owner-only bits below
-             * make it unreadable/unwritable to anyone else. */
             File g = grantsFile(ctx);
             if (g.exists() && !g.delete()) {
                 lastGrantsError = "unlink refused on " + g.getAbsolutePath()
@@ -1032,7 +1154,7 @@ public final class Chain {
                     + " (root-owned?) -- NOT rewriting, that would discard the owner's entries");
             return;
         }
-        List<Integer> g = readGrantsOrNull(ctx);
+        List<String> g = readGrantTokensOrNull(ctx);
         if (g == null) {
             /* The old shape of this function treated "could not read" as "empty", appended our own uid
              * and wrote the result -- which is a one-line way to delete everybody else's grant.  On the
@@ -1042,13 +1164,13 @@ public final class Chain {
                     + " -- not rewriting a list we cannot see");
             return;
         }
-        boolean missing = !g.contains(Integer.valueOf(me));
+        boolean missing = !tokensContainUid(g, me);
         if (missing)
-            g.add(Integer.valueOf(me));
+            g.add(String.valueOf(me));
         /* Rewrite even when our uid is already there: a list left root-owned and 0666 by some
          * earlier root-side edit is both a security hole and, now that the daemon refuses such
          * files, a lock-out of this app's own service. */
-        boolean saved = writeGrants(ctx, g);
+        boolean saved = writeGrantTokens(ctx, g);
         log.line("self-grant uid=" + me + (missing ? " added" : " resealed")
                 + " saved=" + saved + " list=" + g + " why=" + lastGrantsError);
     }
@@ -1078,24 +1200,26 @@ public final class Chain {
      *  used to vanish.  The manager's own uid is always kept, or the next toggle in the
      *  app list could not be saved at all. */
     public static boolean setShellGrant(Context ctx, boolean on) {
-        List<Integer> g = readGrantsOrNull(ctx);
+        List<String> g = readGrantTokensOrNull(ctx);
         if (g == null) {
             lastGrantsError = "refusing to rewrite a list we cannot read: " + lastGrantsError;
             return false;
         }
         int me = android.os.Process.myUid();
-        if (!g.contains(Integer.valueOf(me)))
-            g.add(Integer.valueOf(me));
+        if (!tokensContainUid(g, me))
+            g.add(String.valueOf(me));
         if (on) {
-            if (!g.contains(Integer.valueOf(SHELL_UID)))
-                g.add(Integer.valueOf(SHELL_UID));
+            if (!tokensContainUid(g, SHELL_UID))
+                g.add(String.valueOf(SHELL_UID));
         } else {
-            g.remove(Integer.valueOf(SHELL_UID));
+            for (int i = g.size() - 1; i >= 0; i--)
+                if (tokenUid(g.get(i)) == SHELL_UID)
+                    g.remove(i);
         }
         /* Always rewritten, even for a no-op flip: a list left root-owned and 0666 by an
          * earlier root-side edit is one the daemon refuses outright (sud.c
          * grants_file_usable), and resealing is the only repair this uid can perform. */
-        return writeGrants(ctx, g);
+        return writeGrantTokens(ctx, g);
     }
 
     /* ------------------------------------------------------------------ *
@@ -1646,7 +1770,9 @@ public final class Chain {
     public static List<Entry> listApps(Context ctx) {
         List<Entry> out = new ArrayList<Chain.Entry>();
         PackageManager pm = ctx.getPackageManager();
-        List<Integer> grants = readGrants(ctx);
+        List<String> grants = readGrantTokensOrNull(ctx);
+        if (grants == null)
+            grants = new ArrayList<String>();
         try {
             List<ApplicationInfo> apps = pm.getInstalledApplications(PackageManager.GET_META_DATA);
             for (ApplicationInfo ai : apps) {
@@ -1658,7 +1784,10 @@ public final class Chain {
                 }
                 Entry e = new Entry(ai.packageName, label, ai.uid,
                         (ai.flags & ApplicationInfo.FLAG_SYSTEM) != 0);
-                e.granted = grants.contains(Integer.valueOf(ai.uid));
+                /* A package grant is the precise form; the uid form is what older
+                 * lists (and the adb shell switch) contain. */
+                e.granted = tokensContainPkg(grants, ai.packageName)
+                        || tokensContainUid(grants, ai.uid);
                 out.add(e);
             }
         } catch (Throwable t) {
@@ -1683,18 +1812,54 @@ public final class Chain {
      *  mirror is exactly how that grant would silently vanish.  Turning the shell row itself
      *  off goes through setShellGrant, so this preservation never overrides a real revoke. */
     public static boolean saveSelection(Context ctx, List<Entry> all, List<String> checkedPkgs) {
-        List<Integer> uids = new ArrayList<Integer>();
-        for (Entry e : all)
-            if (checkedPkgs.contains(e.pkg))
-                uids.add(Integer.valueOf(e.uid));
+        List<String> disk = readGrantTokensOrNull(ctx);
+        if (disk == null) {
+            lastGrantsError = "refusing to rewrite a list we cannot read: " + lastGrantsError;
+            return false;
+        }
         int me = android.os.Process.myUid();
-        if (!uids.contains(Integer.valueOf(me)))
-            uids.add(Integer.valueOf(me));
-        List<Integer> disk = readGrantsOrNull(ctx);
-        if (disk != null && disk.contains(Integer.valueOf(SHELL_UID))
-                && !uids.contains(Integer.valueOf(SHELL_UID)))
-            uids.add(Integer.valueOf(SHELL_UID));
-        return writeGrants(ctx, uids);
+        java.util.HashSet<String> knownPkgs = new java.util.HashSet<String>();
+        java.util.HashSet<Integer> listedUids = new java.util.HashSet<Integer>();
+        for (Entry e : all) {
+            knownPkgs.add(e.pkg);
+            listedUids.add(Integer.valueOf(e.uid));
+        }
+        java.util.LinkedHashSet<String> keep = new java.util.LinkedHashSet<String>();
+        /* Start from the file: entries for packages this user's package list does not show
+         * (another user, an app clone) and uids of apps that are not listed at all are
+         * user configuration this screen cannot represent, so they survive a toggle. */
+        for (String t : disk) {
+            String p = tokenPkg(t);
+            int u = tokenUid(t);
+
+            if (p != null) {
+                if (!knownPkgs.contains(p) || checkedPkgs.contains(p))
+                    keep.add("pkg " + p);
+            } else if (u >= 0) {
+                if (u == me || u == SHELL_UID || !listedUids.contains(Integer.valueOf(u)))
+                    keep.add(String.valueOf(u));
+            }
+        }
+        for (Entry e : all) {
+            if (!checkedPkgs.contains(e.pkg))
+                continue;
+            if (e.uid == me)
+                keep.add(String.valueOf(me));
+            else if (e.uid == SHELL_UID)
+                keep.add(String.valueOf(SHELL_UID));
+            else
+                keep.add("pkg " + e.pkg);
+        }
+        keep.add(String.valueOf(me));
+        /* The adb shell grant is preserved from the on-disk list when it is there: it belongs
+         * to the same uid as the com.android.shell row, but that row's state in the caller's
+         * in-memory `checked` can be one refresh behind an ADB switch flip (the settings toggle
+         * writes the list and refreshes asynchronously), and a whole-file rewrite from a stale
+         * mirror is exactly how that grant would silently vanish.  Turning the shell row itself
+         * off goes through setShellGrant, so this preservation never overrides a real revoke. */
+        if (tokensContainUid(disk, SHELL_UID))
+            keep.add(String.valueOf(SHELL_UID));
+        return writeGrantTokens(ctx, new ArrayList<String>(keep));
     }
 
     /** The daemon's decision record.  Since ledger 586 it is 0600 root-owned, so an unprivileged

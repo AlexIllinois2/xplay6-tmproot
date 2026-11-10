@@ -40,6 +40,25 @@ Known route-specific limits, as documented by the project:
 - On 8.1 the vendor's exec-time gate still rejects the literal name `su`; granted apps must invoke `sux` instead.
 - Route 6's name-gate support is verified for 1.15.1; the equivalent site is not ported to 1.17.12, which refuses that arm.
 - On 1.17.12, `adb install -r` may silently return `INSTALL_FAILED_CANCELLED_BY_USER`; uninstall the package first (`adb uninstall com.xplay6.temproot`), then install.
+- Route 7 defeats its name gate with a RAM-only patch on every boot (see [su delivery and the route-7 name gate](#su-delivery-and-the-route-7-name-gate)). On a boot where that patch does not land, only `sux` works there.
+- No route can deliver `su` into `/system/bin`: it is the read-only `dm-0`, and this kernel refuses both bind and tmpfs mounts there.
+
+## su delivery and the route-7 name gate
+
+On `3.18.31-perf-g9dce1fbc9`, any domain but init/root is refused when it execs a file whose last path component is `su`. The verdict is `tbnz w0,#0x1f` at `0xffffffc000323400` in `do_execveat_common`, branching to the `mov w19,#-1` reported as `EPERM`. It matches the name only: inode, label and contents do not matter, and the same bytes named `sux` run.
+
+Route 7 removes that check instead of renaming around it. `Chain.openSuName7` drives `libesc.so` through four steps, in this order:
+
+1. plant the top pgd slot (`0xffffffc001f4cff8`, descriptor `0x0040000040000711`) so the kernel image is writable through the `0xffffffffc0000000` alias;
+2. write `/zz` over `modprobe_path` (`0xffffffc001a499b8`) through the alias and read it back through the root channel;
+3. restore the original path through the alias and read it back again;
+4. only then write `NOP` (`0xD503201F`) over `0xffffffc000323400`, and prove it by exec'ing the delivered `su` from the app's own `untrusted_app` process.
+
+The two data witnesses exist because the alias is the same mechanism the `.text` write uses: if either read-back does not move, the chain aborts and no text byte is written. Nothing persists, so the whole sequence is re-run on every boot (up to four attempts), and the delivered `sux` remains the fallback for a boot where it does not land.
+
+`su`/`sux` are published by `nsmbind` at the end of the chain. Two details are load bearing: the bind must be `MS_BIND | MS_REC`, because the mirror reproduces every pre-existing entry as a file placeholder and a plain `MS_BIND` would expose those as 0-byte files (the `/sbin` 0-byte entries that used to restart critical services); and the mirror path is unique per run (`<base>.<pid>.<timestamp>.`), so a second run cannot publish over the first. `sysoverlay` skips `su`/`sux` under `/sbin`, `/system/bin` and `/system/xbin`, so a module's copy cannot replace the client that talks to this daemon.
+
+The su service frames its replies when the client opens with `XSU2 ...` / `XSU2B ...`: `[1 byte type][4 byte big-endian length][payload]`, where 1 = stdout, 2 = stderr, 3 = exit code, 4 = ready, 5 = retry. stdout and stderr stay separate, which is what libsu's `ShellImpl` expects: it waits for its UUID marker on both streams and reports "no root" when they are merged. Plain `SU ...` clients keep the old merged stream byte for byte.
 
 ## Build
 
@@ -68,7 +87,7 @@ The result is `tools/temproot.apk`. If the native binaries under `tools/` are mi
 bash build.sh   # equivalent to: SKIP_GATE=1 SDK=$HOME/Android/Sdk bash tools/apk/build.sh
 ```
 
-**Build gates:** `tools/apk/build.sh` normally re-derives the kernel addresses and SELinux exemption numbers from `fw/Image`, `fw/7/Image`, and `fw/1712/Image` (not shipped in this repository, see `release/1.9.39/INTEGRITY.txt`) plus the `art/` symbol and policy dumps. If those images are absent the gate aborts. `SKIP_GATE=1` bypasses the re-derivation and prints a warning; artifacts built that way must not be presented as constants-verified.
+**Build gates:** `tools/apk/build.sh` normally re-derives the kernel addresses and SELinux exemption numbers from `fw/Image`, `fw/7/Image`, and `fw/1712/Image` (not shipped in this repository, see `release/1.9.39/INTEGRITY.txt`) plus the `art/` symbol and policy dumps. If those images are absent the gate aborts. `SKIP_GATE=1` bypasses the re-derivation and prints a warning; artifacts built that way must not be presented as constants-verified. With `SKIP_GATE=1`, the route-7 constants in the shipped binary are the ones measured and verified on this build, not re-derived: pgd entry `0xffffffc001f4cff8`, gate `0xffffffc000323400` (`0x37F823A0` to `0xD503201F`), `modprobe_path` `0xffffffc001a499b8`, alias base `0xffffffffc0000000`, block descriptor `0x0040000040000711`.
 
 Magisk runtime module (needs a Magisk APK and a built native tree):
 
@@ -84,7 +103,7 @@ Signing: `tools/apk/debug.keystore` is included in this repository (password `an
 1. Install `tools/temproot.apk` (or the release APK from `release/`).
 2. Open the app and tap **「提权」**. Success is reported as `Root 已就绪`; on some routes the SELinux state returns to `Enforcing` only after the daemon is up.
 3. Authorize apps on the **「应用授权」** page. The allow list takes effect immediately.
-4. Granted apps call `su` through the project's channel; on 8.1 call `sux`. Root-owned processes are intentionally rejected.
+4. Granted apps call `su` through the project's channel; on 8.1, and on 7.1.1 in a boot where the gate patch did not land, call `sux`. Root-owned processes are intentionally rejected.
 5. For automatic re-root after reboot, allow the app to auto-start in **i管家 → 权限管理 → 自启动**. Uninstalling and reinstalling resets this vendor switch.
 6. A reboot removes everything. There is no persistent root, no boot image patch, and no partition write.
 

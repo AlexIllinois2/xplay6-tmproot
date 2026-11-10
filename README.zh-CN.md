@@ -40,6 +40,25 @@
 - 8.1 上厂商的 exec 名字闸仍拒绝字面名 `su`，被授权应用需改用 `sux`。
 - 路线 6 的 su 名字闸只在 1.15.1 上验证过；1.17.12 未移植该点位，这条臂会明确 refuse。
 - 1.17.12 上 `adb install -r` 可能静默返回 `INSTALL_FAILED_CANCELLED_BY_USER`；先卸载（`adb uninstall com.xplay6.temproot`）再安装。
+- 路线 7 每次开机用内存态补丁拆掉名字闸（见 [su 投递与路线 7 名字闸](#su-投递与路线-7-名字闸)）；某次开机补丁没落下时，该机只能用 `sux`。
+- 任何路线都无法把 `su` 投进 `/system/bin`：它是只读的 `dm-0`，本内核在该处拒绝 bind 与 tmpfs 两种挂载。
+
+## su 投递与路线 7 名字闸
+
+在 `3.18.31-perf-g9dce1fbc9` 上，除 init/root 外的任何域 exec 路径末段为 `su` 的文件都会被拒。判定是 `do_execveat_common` 中 `0xffffffc000323400` 的 `tbnz w0,#0x1f`，跳向最终报 `EPERM` 的 `mov w19,#-1`。它只看名字：inode、label、内容都无关，同样字节改名为 `sux` 就能跑。
+
+路线 7 选择拆掉这条检查，而不是改名绕开。`Chain.openSuName7` 驱动 `libesc.so` 按顺序做四步：
+
+1. 把最后一个 pgd 槽（`0xffffffc001f4cff8`，描述符 `0x0040000040000711`）种成 1 GB block，使内核镜像可经 `0xffffffffc0000000` 别名写入；
+2. 经别名把 `modprobe_path`（`0xffffffc001a499b8`）写成 `/zz`，再用 root 通道读回；
+3. 经别名写回原路径，再读回一次；
+4. 两步见证都通过后，才把 `0xffffffc000323400` 写成 `NOP`（`0xD503201F`），并在应用自身的 `untrusted_app` 进程里 exec 投递的 `su` 作为最终验证。
+
+两处数据见证的意义在于：别名就是随后写 `.text` 的同一通道，先用一次只读回环证明它，再动唯一的只读页；任一步读不回就 abort，一个 text 字节都不写。补丁只在内存里，每次开机都会重新执行整套流程（最多 4 次尝试）；某次开机没成功时，投递的 `sux` 仍是可用回退。
+
+`su`/`sux` 由 `nsmbind` 在链末尾发布。两个细节不能省：绑定必须是 `MS_BIND | MS_REC`，因为镜像会把已有条目复刻成文件占位，普通 `MS_BIND` 会让这些占位以 0 字节文件露出来（就是过去触发 critical 服务重启的 `/sbin` 0 字节条目）；镜像路径按 pid+时间戳唯一（`<base>.<pid>.<timestamp>.`），后一次运行不会覆盖前一次。`sysoverlay` 会跳过 `/sbin`、`/system/bin`、`/system/xbin` 下的 `su`/`sux`，模块自带的副本无法替换与该守护进程通信的客户端。
+
+su 服务在客户端以 `XSU2 ...` / `XSU2B ...` 开头时按帧回复：`[1 字节类型][4 字节大端长度][负载]`，1 = stdout，2 = stderr，3 = 退出码，4 = ready，5 = retry。stdout 与 stderr 分路，这是 libsu 的 `ShellImpl` 的要求：它等两条流上都出现 UUID 标记，合并成一条流就会被判成“无 root”。普通 `SU ...` 客户端仍得到旧的合并流，逐字节不变。
 
 ## 构建
 
@@ -68,7 +87,7 @@ SDK=/path/to/Android/Sdk bash tools/apk/build.sh
 bash build.sh   # 等价于：SKIP_GATE=1 SDK=$HOME/Android/Sdk bash tools/apk/build.sh
 ```
 
-**构建门禁：** `tools/apk/build.sh` 正常会从 `fw/Image`、`fw/7/Image`、`fw/1712/Image`（不在本仓库内，哈希见 `release/1.9.39/INTEGRITY.txt`）以及 `art/` 的符号/策略留底重新推导内核地址和 SELinux 豁免编号。镜像缺失时门禁会 ABORT。`SKIP_GATE=1` 会跳过重推并打印警告；这样构建出的产物不能当作“常量已核对”的交付件。
+**构建门禁：** `tools/apk/build.sh` 正常会从 `fw/Image`、`fw/7/Image`、`fw/1712/Image`（不在本仓库内，哈希见 `release/1.9.39/INTEGRITY.txt`）以及 `art/` 的符号/策略留底重新推导内核地址和 SELinux 豁免编号。镜像缺失时门禁会 ABORT。`SKIP_GATE=1` 会跳过重推并打印警告；这样构建出的产物不能当作“常量已核对”的交付件。`SKIP_GATE=1` 构建时，二进制里的路线 7 常量是本轮实测并验证过的值，而非重推结果：pgd 项 `0xffffffc001f4cff8`、门 `0xffffffc000323400`（`0x37F823A0` 写为 `0xD503201F`）、`modprobe_path` `0xffffffc001a499b8`、别名基址 `0xffffffffc0000000`、block 描述符 `0x0040000040000711`。
 
 Magisk 运行时模块（需要 Magisk APK 和已构建的原生件）：
 
@@ -84,7 +103,7 @@ MAGISK_APK=/path/to/Magisk-v30.7.apk bash tools/build_magisk_module.sh
 1. 安装 `tools/temproot.apk`（或 `release/` 下的发行版 APK）。
 2. 打开应用点 **「提权」**。成功时显示 `Root 已就绪`；部分路线要等守护进程起来后 SELinux 才回到 `Enforcing`。
 3. 在 **「应用授权」** 页勾选要授权的应用，名单立即生效。
-4. 被授权应用通过本项目的通道调用 `su`；8.1 上请用 `sux`。以 root 身份运行的进程会被有意拒绝。
+4. 被授权应用通过本项目的通道调用 `su`；8.1 上、以及路线 7 某次开机补丁未落下时，请用 `sux`。以 root 身份运行的进程会被有意拒绝。
 5. 如需重启后自动重新提权，请在 **i管家 → 权限管理 → 自启动** 中放行本应用。卸载重装会让这个厂商开关恢复为关闭。
 6. 重启后一切消失。不存在持久 root、boot 镜像补丁或分区写入。
 

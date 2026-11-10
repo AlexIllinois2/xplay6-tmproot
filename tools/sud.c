@@ -11,9 +11,11 @@
 #include <sys/stat.h>
 #include "copy_atomic.h"
 #include "grants_rule.h"
+#include "grants_policy.h"
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/select.h>
+#include <poll.h>
 #include <sys/time.h>
 #include <sys/un.h>
 #include <sys/mount.h>
@@ -290,14 +292,16 @@ static void relabel_if_kernel(void)
  * died.  Each child drops the listeners it does not serve. */
 static void close_listeners(void)
 {
-    if (g_ltcp >= 0)
-        close(g_ltcp);
-    if (g_lsu >= 0)
-        close(g_lsu);
-    if (g_abs >= 0)
-        close(g_abs);
-    if (g_gunix >= 0)
-        close(g_gunix);
+    /* Clearing the globals is not tidiness: the per-connection handler closes
+     * the listeners, and the command child calls this again.  Without the reset
+     * the second call closes whatever now owns those fd numbers -- measured
+     * 2026-11-09: pipe() handed out the just-freed 128/129, the child then
+     * closed its own stdout pipe, and every V2 stdout frame vanished while
+     * stderr worked. */
+    if (g_ltcp >= 0) { close(g_ltcp); g_ltcp = -1; }
+    if (g_lsu >= 0) { close(g_lsu); g_lsu = -1; }
+    if (g_abs >= 0) { close(g_abs); g_abs = -1; }
+    if (g_gunix >= 0) { close(g_gunix); g_gunix = -1; }
 }
 
 static void serve_tcp(int fd)
@@ -837,7 +841,7 @@ static int grants_file_usable(const char *path, int owner_must_be_root)
     return ok;
 }
 
-static int uid_allowed(int uid)
+static int uid_allowed(int uid, pid_t pid)
 {
     char line[256];
     int i;
@@ -853,8 +857,7 @@ static int uid_allowed(int uid)
         if (f == NULL)
             continue;
         while (fgets(line, sizeof line, f)) {
-            int g = atoi(line);
-            if (g == uid && g != 0) {
+            if (gp_line_allows(line, uid, pid)) {
                 fclose(f);
                 return 1;
             }
@@ -864,17 +867,174 @@ static int uid_allowed(int uid)
     return 0;
 }
 
+static int b64dec(const char *in, char *out, size_t cap)
+{
+    size_t o = 0;
+    int acc = 0, bits = 0;
+
+    for (; *in; in++) {
+        int v;
+
+        if (*in >= 'A' && *in <= 'Z') v = *in - 'A';
+        else if (*in >= 'a' && *in <= 'z') v = *in - 'a' + 26;
+        else if (*in >= '0' && *in <= '9') v = *in - '0' + 52;
+        else if (*in == '+') v = 62;
+        else if (*in == '/') v = 63;
+        else if (*in == '=') break;
+        else if (*in == '\r' || *in == '\n' || *in == ' ' || *in == '\t') continue;
+        else return -1;
+        acc = (acc << 6) | v;
+        bits += 6;
+        if (bits >= 8) {
+            bits -= 8;
+            if (o + 1 >= cap)
+                return -1;
+            out[o++] = (char) ((acc >> bits) & 0xff);
+        }
+    }
+    out[o] = 0;
+    return (int) o;
+}
+
+/* ---- response framing for the su service --------------------------------
+ * libsu's ShellImpl reads the child's stdout and stderr through two separate
+ * streams and only completes a job when BOTH have seen its UUID marker
+ * (`echo <uuid>; echo <uuid> >&2` -- confirmed by dexdump in z4.w).  We hand
+ * the caller a socket, not a process, and everything used to be merged into
+ * stdout (dup2(fd,2)), so the stderr reader never saw its marker, the shell
+ * check timed out, and every libsu-based app reported "no root" although the
+ * command itself ran fine (measured 2026-11-09 with
+ * com.xayah.databackup.foss).
+ *
+ * A new client asks for version 2 with `XSU2 ...` / `XSU2B ...` and gets
+ * frames on the same socket:
+ *   [1 byte type][4 byte big-endian length][payload]
+ *   type 1 = child stdout, 2 = child stderr, 3 = exit code (decimal, no '\n'),
+ *   4 = ready (sent before fork: lets the client tell "new daemon" from an old
+ *       one answering `ERR unknown request`), 5 = retry (identity could not be
+ *       attributed on this channel; call back through the peer hand-off).
+ * The verb deliberately does not start with "SU": an old daemon, and route 8's
+ * shell responder, reject it without running anything, which is what makes the
+ * client's V1 fallback safe.  Plain `SU ...` keeps the merged stream byte for
+ * byte, so every pre-existing client keeps working unchanged.
+ */
+#define FRAME_OUT   1
+#define FRAME_ERR   2
+#define FRAME_EXIT  3
+#define FRAME_READY 4
+#define FRAME_RETRY 5
+
+struct sconn {
+    int fd;
+    int v2;
+};
+
+static int s_write(struct sconn *c, int type, const char *buf, size_t n)
+{
+    unsigned char h[5];
+    size_t off = 0;
+
+    if (!c->v2)
+        return (int) write(c->fd, buf, n);
+    h[0] = (unsigned char) type;
+    h[1] = (unsigned char) ((n >> 24) & 0xff);
+    h[2] = (unsigned char) ((n >> 16) & 0xff);
+    h[3] = (unsigned char) ((n >> 8) & 0xff);
+    h[4] = (unsigned char) (n & 0xff);
+    if (write(c->fd, h, 5) != 5)
+        return -1;
+    while (off < n) {
+        ssize_t w = write(c->fd, buf + off, n - off);
+
+        if (w <= 0)
+            return -1;
+        off += (size_t) w;
+    }
+    return (int) n;
+}
+
+static void s_msg(struct sconn *c, int type, const char *s)
+{
+    s_write(c, type, s, strlen(s));
+}
+
+static void s_exit(struct sconn *c, int code)
+{
+    char b[24];
+    int n;
+
+    if (!c->v2) {
+        n = snprintf(b, sizeof b, "\n@SUD_EXIT=%d\n", code);
+        write(c->fd, b, (size_t) n);
+        return;
+    }
+    n = snprintf(b, sizeof b, "%d", code);
+    s_write(c, FRAME_EXIT, b, (size_t) n);
+}
+
+/* Move the child's stdout/stderr into frames until both pipes are closed. */
+static void pump_frames(struct sconn *c, pid_t pid, int ofd, int efd)
+{
+    struct pollfd pf[2];
+    char buf[8192];
+    int open_count = 2, i;
+
+    pf[0].fd = ofd;
+    pf[0].events = POLLIN;
+    pf[0].revents = 0;
+    pf[1].fd = efd;
+    pf[1].events = POLLIN;
+    pf[1].revents = 0;
+    while (open_count > 0) {
+        ssize_t n;
+
+        if (poll(pf, 2, -1) < 0) {
+            if (errno == EINTR)
+                continue;
+            break;
+        }
+        for (i = 0; i < 2; i++) {
+            if (pf[i].fd < 0 || !(pf[i].revents & (POLLIN | POLLHUP | POLLERR)))
+                continue;
+            n = read(pf[i].fd, buf, sizeof buf);
+            if (n <= 0) {
+                close(pf[i].fd);
+                pf[i].fd = -1;
+                open_count--;
+                continue;
+            }
+            if (s_write(c, i == 0 ? FRAME_OUT : FRAME_ERR, buf, (size_t) n) < 0) {
+                /* The caller is gone.  Stop reading, or the child blocks forever on a
+                 * full pipe; take the session down with the client. */
+                kill(pid, SIGKILL);
+                kill(-pid, SIGKILL);
+                goto out;
+            }
+        }
+    }
+out:
+    for (i = 0; i < 2; i++)
+        if (pf[i].fd >= 0)
+            close(pf[i].fd);
+}
+
 static void dispatch_su(int fd, int cuid, pid_t cpid, char *line);
+
+static int is_su_v2(const char *line)
+{
+    return !strncmp(line, "XSU2 ", 5) || !strncmp(line, "XSU2B ", 6);
+}
 
 static void handle_su(int fd)
 {
-    char line[1024];
+    char line[16384];
     pid_t cpid = 0;
-    int cuid;
+    int cuid, v2;
 
     cuid = peer_uid(fd, &cpid);
     read_one_line(fd, line, sizeof line);
     stage("su request uid=%d pid=%d: %.200s", cuid, cpid, line);
+    v2 = is_su_v2(line);
     if (cuid < 0) {
         uid_t touid = 0;
 
@@ -882,7 +1042,18 @@ static void handle_su(int fd)
             cuid = (int) touid;
             stage("attributed by token -> uid=%d", cuid);
         } else {
-            write(fd, "ERR cannot attribute caller\n", 28);
+            /* Deliberately framed as RETRY, not as a plain error: the client can
+             * still fix this by re-sending over the peer hand-off, where the kernel
+             * supplies SCM_CREDENTIALS.  An old client gets the old bytes. */
+            if (v2) {
+                struct sconn c;
+
+                c.fd = fd;
+                c.v2 = 1;
+                s_msg(&c, FRAME_RETRY, "ERR cannot attribute caller");
+            } else {
+                write(fd, "ERR cannot attribute caller\n", 28);
+            }
             return;
         }
     }
@@ -997,7 +1168,7 @@ static void sweep_sessions(void)
             unlink(path);
             continue;
         }
-        if (uid < 0 || uid_allowed(uid))
+        if (uid < 0 || uid_allowed(uid, -1))
             continue;
         /* spawn_sh() calls setsid(), so the session is its own process group:
          * signal the group as well, or a helper it detached would outlive us. */
@@ -1094,6 +1265,10 @@ static void import_caller_env(pid_t cpid)
 
 static void dispatch_su(int fd, int cuid, pid_t cpid, char *line)
 {
+    struct sconn c;
+
+    c.fd = fd;
+    c.v2 = is_su_v2(line);
     /* The token is only an identity carrier: relayd appends it to the request
      * line, so it must come back off before the line is parsed as a command.
      * Left in place it became part of the command:
@@ -1103,12 +1278,12 @@ static void dispatch_su(int fd, int cuid, pid_t cpid, char *line)
      * not matter which channel carried the request. */
     strip_token(line);
 
-    if (!uid_allowed(cuid)) {
+    if (!uid_allowed(cuid, cpid)) {
         /* Denied without explaining anything: the whole point of this design is
          * that an unlisted app learns nothing about what is on the other end. */
         stage("denied uid=%d pid=%d", cuid, cpid);
         su_log("deny   uid=%-6d pid=%-6d %.200s", cuid, cpid, line);
-        write(fd, "ERR unknown service\n", 20);
+        s_msg(&c, FRAME_ERR, "ERR unknown service\n");
         return;
     }
     if (!strncmp(line, "PING", 4)) {
@@ -1182,10 +1357,25 @@ static void dispatch_su(int fd, int cuid, pid_t cpid, char *line)
         su_log("%s uid=%-6d pid=%-6d %.160s", rc == 0 ? "grant" : "refuse", cuid, cpid, line);
         return;
     }
-    if (!strncmp(line, "SU", 2)) {
-        char *p = line + 2, *sp, *cmd;
-        int uid;
+    if (!strncmp(line, "SU", 2) || is_su_v2(line)) {
+        int encoded = 0, v2 = c.v2;
+        char decoded[8192];
+        char *p, *sp, *cmd;
+        int uid, op[2] = { -1, -1 }, ep[2] = { -1, -1 };
         pid_t pid;
+        char *av[5];
+
+        if (!strncmp(line, "XSU2B ", 6)) {
+            encoded = 1;
+            p = line + 6;
+        } else if (!strncmp(line, "XSU2 ", 5)) {
+            p = line + 5;
+        } else if (!strncmp(line, "SUX", 3)) {
+            encoded = 1;
+            p = line + 3;
+        } else {
+            p = line + 2;
+        }
 
         /* "SU <uid> <cmd...>": skip the spaces after the verb, take the uid
          * token, then the command starts at the next non-space.  Using the first
@@ -1195,7 +1385,7 @@ static void dispatch_su(int fd, int cuid, pid_t cpid, char *line)
             p++;
         sp = strchr(p, ' ');
         if (sp == NULL) {
-            write(fd, "ERR usage: SU <uid> <cmd>\n", 26);
+            s_msg(&c, FRAME_ERR, "ERR usage: SU <uid> <cmd>\n");
             return;
         }
         *sp++ = 0;
@@ -1203,8 +1393,15 @@ static void dispatch_su(int fd, int cuid, pid_t cpid, char *line)
         cmd = sp;
         while (*cmd == ' ' || *cmd == '\t')
             cmd++;
+        if (encoded) {
+            if (b64dec(cmd, decoded, sizeof decoded) <= 0) {
+                s_msg(&c, FRAME_ERR, "ERR bad command encoding\n");
+                return;
+            }
+            cmd = decoded;
+        }
         if (*cmd == 0) {
-            write(fd, "ERR empty command\n", 18);
+            s_msg(&c, FRAME_ERR, "ERR empty command\n");
             return;
         }
         /* A granted app may ask for root or for itself -- not for some other app's
@@ -1213,16 +1410,26 @@ static void dispatch_su(int fd, int cuid, pid_t cpid, char *line)
             stage("SU target uid=%d refused (caller is %d)", uid, cuid);
             su_log("refuse uid=%-6d pid=%-6d (target %d not allowed) %.120s",
                    cuid, cpid, uid, cmd);
-            write(fd, "ERR target uid not allowed\n", 27);
+            s_msg(&c, FRAME_ERR, "ERR target uid not allowed\n");
+            return;
+        }
+        if (v2 && (pipe(op) != 0 || pipe(ep) != 0)) {
+            stage("pipe for V2 failed errno=%d", errno);
+            s_msg(&c, FRAME_ERR, "ERR cannot separate streams\n");
+            if (op[0] >= 0) { close(op[0]); close(op[1]); }
             return;
         }
         /* The decision is recorded when it is MADE, not when the command finishes:
          * an interactive session can outlive the audit otherwise (measured -- MT's
          * root shell was running while sud.log still had no line for its uid). */
         su_log("open   uid=%-6d pid=%-6d target=%-6d %.180s", cuid, cpid, uid, cmd);
+        /* Sent before fork on purpose: its arrival is how a client tells a daemon
+         * that speaks V2 from an old one that answers ERR unknown request, and it
+         * has to arrive before a silent command can look like an old-daemon error. */
+        if (v2)
+            s_msg(&c, FRAME_READY, "ok\n");
         pid = fork();
         if (pid == 0) {
-            char *av[5];
             int i = 0;
 
             close_listeners();
@@ -1235,14 +1442,40 @@ static void dispatch_su(int fd, int cuid, pid_t cpid, char *line)
             }
             stage("su exec uid=%d cmd=%.120s", uid, cmd);
             if (!strcmp(cmd, "-")) {
-                spawn_sh(fd);
+                if (!v2) {
+                    spawn_sh(fd);
+                }
+                /* V2 interactive: stdin is the socket, but stdout/stderr must stay
+                 * apart, so they go through the two pipes the handler drains. */
+                setsid();
+                dup2(fd, 0);
+                dup2(op[1], 1);
+                dup2(ep[1], 2);
+                close(op[0]);
+                close(ep[0]);
+                close(op[1]);
+                close(ep[1]);
+                if (fd > 2)
+                    close(fd);
+                setenv("HOME", "/data/local/tmp", 1);
+                setenv("PATH", "/sbin:/system/bin:/system/xbin:/vendor/bin", 1);
+                execl("/system/bin/sh", "sh", (char *) 0);
             } else {
                 /* argv[0] is the NAME, not the path: with the path in argv[0] and
                  * "sh" in argv[1], mksh read "sh" as the script file to run and
                  * answered "sh: No such file or directory". */
                 dup2(fd, 0);
-                dup2(fd, 1);
-                dup2(fd, 2);
+                if (v2) {
+                    dup2(op[1], 1);
+                    dup2(ep[1], 2);
+                    close(op[0]);
+                    close(ep[0]);
+                    close(op[1]);
+                    close(ep[1]);
+                } else {
+                    dup2(fd, 1);
+                    dup2(fd, 2);
+                }
                 if (fd > 2)
                     close(fd);
                 setenv("PATH", "/sbin:/system/bin:/system/xbin:/vendor/bin", 1);
@@ -1251,14 +1484,17 @@ static void dispatch_su(int fd, int cuid, pid_t cpid, char *line)
                 av[i++] = cmd;
                 av[i] = NULL;
                 execv("/system/bin/sh", av);
-                stage("execv /system/bin/sh failed errno=%d cmd=%.120s", errno, cmd);
-                write(fd, "ERR exec failed\n", 16);
             }
+            stage("execv /system/bin/sh failed errno=%d cmd=%.120s", errno, cmd);
             _exit(127);
         }
         if (pid < 0) {
             stage("fork for SU failed errno=%d", errno);
-            write(fd, "ERR fork failed\n", 16);
+            s_msg(&c, FRAME_ERR, "ERR fork failed\n");
+            if (v2) {
+                close(op[0]); close(op[1]);
+                close(ep[0]); close(ep[1]);
+            }
             return;
         }
         /* Registered so the accept loop's sweep can take the session away if the
@@ -1269,8 +1505,12 @@ static void dispatch_su(int fd, int cuid, pid_t cpid, char *line)
          * still running, and the caller saw a clean EOF with no output. */
         {
             int st = 0, code = 127;
-            char tail[32];
 
+            if (v2) {
+                close(op[1]);
+                close(ep[1]);
+                pump_frames(&c, pid, op[0], ep[0]);
+            }
             if (waitpid(pid, &st, 0) < 0)
                 stage("waitpid failed errno=%d", errno);
             else if (WIFEXITED(st))
@@ -1281,10 +1521,9 @@ static void dispatch_su(int fd, int cuid, pid_t cpid, char *line)
             stage("su cmd pid=%d status=%d code=%d", pid, st, code);
             su_log("allow  uid=%-6d pid=%-6d target=%-6d code=%-4d %.180s",
                    cuid, cpid, uid, code, cmd);
-            /* A socket carries no wait status, so the code travels as a trailer the
-             * client strips off (see suc.c). */
-            snprintf(tail, sizeof tail, "\n@SUD_EXIT=%d\n", code);
-            write(fd, tail, strlen(tail));
+            /* A socket carries no wait status: V1 travels it as a trailer the
+             * client strips off (see suc.c), V2 as a FRAME_EXIT. */
+            s_exit(&c, code);
         }
         return;
     }

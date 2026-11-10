@@ -420,6 +420,38 @@ public final class Modules {
             }
             String s = Chain.root("sh " + ENGINE_DIR + "/modboot.sh service");
             Log.i(TAG, "boot service: " + s);
+            /* The su names have to be delivered AGAIN here, and last.
+             *
+             * Chain.openSuName7() publishes them before this pass, but a module's
+             * system/ tree is overlaid afterwards: publishing /system/xbin replaces
+             * the whole directory with a tmpfs rebuilt from the shipped backup, so
+             * the chain's copy is gone (measured 2026-11-10: after the reboot
+             * /sbin/su was our 2150200-byte client while /system/xbin/su did not
+             * exist at all).  sysoverlay's is_su_path() skip is what keeps the
+             * module's own 1098-byte Magisk wrapper out; this copy is what puts
+             * ours back, so both names survive the module pass.
+             *
+             * chcon matters because /system/xbin is that tmpfs, and a freshly
+             * created file there carries the tmpfs label, which apps may not read.
+             * The md5 pair is the witness that the name is the same bytes as the
+             * one /sbin serves.
+             *
+             * The copy itself has to run in PID 1's mount namespace (nsmbind --sh):
+             * the root channel sees a DIFFERENT /system/xbin tmpfs instance than
+             * PID 1 does (measured 2026-11-10: mount id 1727/0:25 in the channel
+             * vs 895/0:24 shared:306 in PID 1), so a plain `cp` succeeded into a
+             * copy no other process could see and `adb shell` still answered
+             * "No such file". */
+            File su = stageNative(ctx, QLOG, "su");
+            File ns = stageNative(ctx, QLOG, "nsmbind");
+            if (su != null && ns != null)
+                Log.i(TAG, "boot su re-publish: " + Chain.root(
+                        ns.getAbsolutePath() + " --sh 'cp " + su.getAbsolutePath()
+                        + " /system/xbin/su && "
+                        + "cp " + su.getAbsolutePath() + " /system/xbin/sux && "
+                        + "chmod 755 /system/xbin/su /system/xbin/sux && "
+                        + "chcon u:object_r:system_file:s0 /system/xbin/su /system/xbin/sux && "
+                        + "md5sum /system/xbin/su /sbin/su'"));
         } catch (Throwable t) {
             Log.i(TAG, "bootRun: " + t);
         }

@@ -35,6 +35,8 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include "grants_policy.h"
+
 #define APP_UID_MIN 10000
 
 static const char *g_grants = "/data/local/tmp/relayd-grants.txt";
@@ -79,16 +81,20 @@ static int write_all(int fd, const char *b, size_t n)
 	return 0;
 }
 
-/* the manager's allow list, one uid per line; ours to write, ours to read */
-static int allowed(uid_t uid)
+/* the manager's allow list: a plain uid (old shape) or "pkg <name>".  The package
+ * shape is resolved from the kernel's process tree, so apps sharing a uid no longer
+ * inherit each other's grant and an app clone is matched by name. */
+static int allowed(uid_t uid, pid_t pid)
 {
-	char line[64];
+	char line[300];
 	FILE *f = fopen(g_grants, "r");
 
+	if (uid == 0)
+		return 1;
 	if (!f)
 		return 0;
 	while (fgets(line, sizeof line, f))
-		if (atoi(line) == (int) uid) {
+		if (gp_line_allows(line, (int) uid, pid)) {
 			fclose(f);
 			return 1;
 		}
@@ -146,7 +152,7 @@ static void copy_both(int a, int b)
 static void serve_one(int c)
 {
 	struct ucred uc;
-	char req[2048], rest[2048], out[2100];
+	char req[16384], rest[16384], out[16600];
 	socklen_t l = sizeof uc;
  gid_t grp[32];
 	int n, sfd = -1, tok = 0;
@@ -200,7 +206,7 @@ static void serve_one(int c)
 	req[nl] = 0;
 	if (nl > 0 && req[nl - 1] == '\r')
 		req[nl - 1] = 0;
-	if (!allowed(uc.uid)) {
+	if (!allowed(uc.uid, uc.pid)) {
 		/* same bytes the daemon sends for an unknown service: an unlisted app learns nothing */
 		logf("relayd: deny uid=%d cmd=%.160s\n", (int) uc.uid, req);
 		write_all(c, "ERR unknown service\n", 20);

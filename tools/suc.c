@@ -280,12 +280,204 @@ static int emit_close(void)
     return exit_seen ? exit_code : 0;
 }
 
+/* ---- V2 channel --------------------------------------------------------
+ * The daemon used to hand us one merged byte stream (stdout and stderr on the
+ * same socket), which libsu rejects: its ShellImpl reads both streams through
+ * separate threads and only finishes a job when BOTH have seen the job's UUID
+ * marker (`echo <uuid>; echo <uuid> >&2`).  With stderr merged into stdout the
+ * stderr reader never sees anything, the shell check times out, and the app
+ * reports "no root" even though the command ran.
+ *
+ * So we ask for `XSU2`/`XSU2B`, which makes the daemon answer with frames:
+ *   [type][len:4 BE][payload], type 1=stdout 2=stderr 3=exit 4=ready 5=retry
+ * The verb deliberately does not start with "SU", so a daemon that does not
+ * know it (an older build, or route 8's shell responder) refuses immediately
+ * with `ERR unknown request` instead of running anything -- that is what makes
+ * the V1 fallback in main() safe.  Type 5 means "I could not attribute you on
+ * this channel": retry over the peer hand-off, which carries SCM_CREDENTIALS.
+ */
+#define F_OUT   1
+#define F_ERR   2
+#define F_EXIT  3
+#define F_READY 4
+#define F_RETRY 5
+
+static int read_exact(int fd, void *buf, size_t n)
+{
+    unsigned char *p = buf;
+
+    while (n > 0) {
+        ssize_t r = read(fd, p, n);
+
+        if (r <= 0)
+            return -1;
+        p += r;
+        n -= (size_t) r;
+    }
+    return 0;
+}
+
+/* Returns the command's exit code; *retry is set when the daemon asked for the
+ * peer hand-off.  Output is streamed: there is no "@SUD_EXIT" trailer to strip
+ * here, the exit status travels in its own frame. */
+static int relay_v2(int fd, int interactive, int *retry)
+{
+    struct pollfd pf[2];
+    char buf[4096];
+    unsigned char h[5];
+    int code = 0;
+
+    *retry = 0;
+    pf[0].fd = fd;
+    pf[0].events = POLLIN;
+    pf[1].fd = 0;
+    pf[1].events = interactive ? POLLIN : 0;
+    for (;;) {
+        int type;
+        long len;
+
+        if (poll(pf, 2, -1) < 0) {
+            if (errno == EINTR)
+                continue;
+            break;
+        }
+        if (pf[1].revents & (POLLIN | POLLHUP)) {
+            int n = read(0, buf, sizeof buf);
+
+            if (n <= 0) {
+                shutdown(fd, SHUT_WR);
+                pf[1].events = 0;
+            } else if (write(fd, buf, (size_t) n) < 0) {
+                break;
+            }
+        }
+        if (!(pf[0].revents & (POLLIN | POLLHUP | POLLERR)))
+            continue;
+        if (read_exact(fd, h, 5) != 0)
+            break;
+        type = h[0];
+        len = ((long) h[1] << 24) | ((long) h[2] << 16) | ((long) h[3] << 8) | h[4];
+        if (len < 0 || len > (1 << 22))
+            break;
+        if (type == F_RETRY) {
+            *retry = 1;
+            return 0;
+        }
+        while (len > 0) {
+            int take = len > (long) sizeof buf ? (int) sizeof buf : (int) len;
+
+            if (read_exact(fd, buf, (size_t) take) != 0)
+                return code;
+            if (type == F_OUT) {
+                if (write(1, buf, (size_t) take) < 0)
+                    ;
+            } else if (type == F_ERR) {
+                if (write(2, buf, (size_t) take) < 0)
+                    ;
+            } else if (type == F_EXIT) {
+                char t[32];
+                int k = take < 31 ? take : 31;
+
+                memcpy(t, buf, (size_t) k);
+                t[k] = 0;
+                code = atoi(t);
+            }
+            len -= take;
+        }
+    }
+    return code;
+}
+
+/* Root apps probe the client before they run anything: `su -v` / `su -V` are
+ * Magisk's version queries, and a client that answers them by opening an
+ * interactive shell makes the probe time out and the app report "no root".
+ * The strings below are the ones libsu/Magisk-aware detectors look for. */
+#define MAGISK_VER_STR "MAGISKSU"
+#define MAGISK_VER_CODE "30700"
+
+static void usage(FILE *o)
+{
+    fprintf(o,
+        "Usage: su [options] [--] [user [command [args...]]]\n"
+        "\n"
+        "Options:\n"
+        "  -c, --command COMMAND    pass COMMAND to the login shell\n"
+        "  -s, --shell SHELL        use SHELL instead of /system/bin/sh\n"
+        "  -u, --user USER          run as USER (name or uid; default root)\n"
+        "  -l, --login              login shell (accepted, no-op here)\n"
+        "  -p, --preserve-environment  keep the caller environment (default)\n"
+        "  -m, --mount-master       run in the global mount namespace (accepted)\n"
+        "  -v, --version            print the version string\n"
+        "  -V                       print the numeric version code\n"
+        "  -h, --help               print this help\n"
+        "\n"
+        "Exit status of COMMAND is returned; 127 means the root channel is down.\n");
+}
+
+/* Encode a request payload so newlines and NUL-free binary-ish text survive the
+ * line-based SU protocol.  Commands with real newlines used to be truncated at
+ * the first one, which silently turned multi-line backup scripts into a single
+ * bogus line. */
+static void b64enc(const char *in, char *out)
+{
+    static const char T[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const unsigned char *p = (const unsigned char *) in;
+    size_t n = strlen(in), i, o = 0;
+
+    for (i = 0; i + 2 < n; i += 3) {
+        unsigned v = (p[i] << 16) | (p[i + 1] << 8) | p[i + 2];
+        out[o++] = T[(v >> 18) & 63];
+        out[o++] = T[(v >> 12) & 63];
+        out[o++] = T[(v >> 6) & 63];
+        out[o++] = T[v & 63];
+    }
+    if (i < n) {
+        unsigned v = p[i] << 16;
+        if (i + 1 < n) v |= p[i + 1] << 8;
+        out[o++] = T[(v >> 18) & 63];
+        out[o++] = T[(v >> 12) & 63];
+        out[o++] = i + 1 < n ? T[(v >> 6) & 63] : '=';
+        out[o++] = '=';
+    }
+    out[o] = 0;
+}
+
+/* Append one argv element to a command string, single-quoting it so the shell
+ * receives it verbatim. */
+static void append_arg(char *dst, size_t cap, const char *a)
+{
+    size_t l = strlen(dst), k;
+
+    if (l >= cap - 1)
+        return;
+    if (l)
+        dst[l++] = ' ';
+    dst[l++] = '\'';
+    for (k = 0; a[k] && l < cap - 3; k++) {
+        if (a[k] == '\'') {
+            if (l < cap - 5) {
+                dst[l++] = '\'';
+                dst[l++] = '\\';
+                dst[l++] = '\'';
+                dst[l++] = '\'';
+            }
+        } else {
+            dst[l++] = a[k];
+        }
+    }
+    if (l < cap - 1)
+        dst[l++] = '\'';
+    dst[l] = 0;
+}
+
 int main(int argc, char **argv)
 {
-    char req[4200], out[8192];
+    char req[12288], req1[12288], out[8192], cmdbuf[6144], b64[9216];
     struct pollfd pf[2];
-    int fd, uid = 0, i, interactive = 0, chan = 0;
+    int fd, uid = 0, i, interactive = 0, chan = 0, uid_set = 0, cmd_set = 0;
     const char *cmd = NULL;
+    char *pos[32];
+    int npos = 0;
 
     /* Diagnostic: `sux --rawexec <path> [args...]` calls execve through the raw
      * syscall instead of libc's wrapper.  There is no "su" string anywhere in this
@@ -303,22 +495,113 @@ int main(int argc, char **argv)
     }
 
     for (i = 1; i < argc; i++) {
-        if (!strcmp(argv[i], "-c") && i + 1 < argc) {
-            cmd = argv[++i];
-        } else if (!strcmp(argv[i], "-")) {
-            interactive = 1;
-        } else if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) {
-            printf("usage: su [-c <cmd>] [uid]   (temp-root sud client)\n");
+        const char *a = argv[i];
+
+        if (!strcmp(a, "-c") || !strcmp(a, "--command")) {
+            if (i + 1 < argc) {
+                cmd = argv[++i];
+                cmd_set = 1;
+            }
+        } else if (!strncmp(a, "--command=", 10)) {
+            cmd = a + 10;
+            cmd_set = 1;
+        } else if (!strcmp(a, "-s") || !strcmp(a, "--shell") ||
+                   !strcmp(a, "-u") || !strcmp(a, "--user") ||
+                   !strcmp(a, "-g") || !strcmp(a, "--group") ||
+                   !strcmp(a, "-G") || !strcmp(a, "--supp-group")) {
+            const char *v = i + 1 < argc ? argv[++i] : NULL;
+
+            if (v != NULL && (!strcmp(a, "-u") || !strcmp(a, "--user"))) {
+                if (!strcmp(v, "root"))
+                    uid = 0, uid_set = 1;
+                else if (!strcmp(v, "shell"))
+                    uid = 2000, uid_set = 1;
+                else if (v[0] >= '0' && v[0] <= '9')
+                    uid = atoi(v), uid_set = 1;
+            }
+        } else if (!strcmp(a, "-v") || !strcmp(a, "--version")) {
+            printf("%s\n", MAGISK_VER_STR);
             return 0;
-        } else if (argv[i][0] >= '0' && argv[i][0] <= '9') {
-            uid = atoi(argv[i]);
+        } else if (!strcmp(a, "-V")) {
+            printf("%s\n", MAGISK_VER_CODE);
+            return 0;
+        } else if (!strcmp(a, "--help") || !strcmp(a, "-h")) {
+            usage(stdout);
+            return 0;
+        } else if (!strcmp(a, "-l") || !strcmp(a, "--login") ||
+                   !strcmp(a, "-p") || !strcmp(a, "--preserve-environment") ||
+                   !strcmp(a, "-m") || !strcmp(a, "-mm") || !strcmp(a, "-M") ||
+                   !strcmp(a, "--mount-master")) {
+            /* accepted for compatibility; this client already keeps the caller's
+             * environment and there is only one mount namespace that matters */
+        } else if (!strcmp(a, "--")) {
+            for (i++; i < argc && npos < 32; i++)
+                pos[npos++] = argv[i];
+            break;
+        } else if (!strcmp(a, "-")) {
+            interactive = 1;
+        } else if (a[0] == '-' && a[1] != 0) {
+            /* unknown option: keep old behaviour (ignore) rather than turning a
+             * working root call into a usage error */
+        } else if (npos < 32) {
+            pos[npos++] = argv[i];
         }
     }
+
+    /* Positional shapes root apps actually use:
+     *   su 0 id            -> uid 0, command "id"
+     *   su root id -u      -> uid 0, command "id -u"
+     *   su id              -> command "id" as root
+     *   su -c "cmd" args   -> command "cmd" with args appended */
+    cmdbuf[0] = 0;
+    if (cmd != NULL) {
+        snprintf(cmdbuf, sizeof cmdbuf, "%s", cmd);
+        cmd = NULL;
+    }
+    if (npos > 0) {
+        int first_is_user = 0;
+
+        if (!uid_set) {
+            const char *p0 = pos[0];
+
+            if (!strcmp(p0, "root"))
+                uid = 0, first_is_user = 1;
+            else if (!strcmp(p0, "shell"))
+                uid = 2000, first_is_user = 1;
+            else if (p0[0] >= '0' && p0[0] <= '9') {
+                char *end = NULL;
+                long v = strtol(p0, &end, 10);
+
+                if (end != NULL && *end == 0)
+                    uid = (int) v, first_is_user = 1;
+            }
+        }
+        for (i = first_is_user ? 1 : 0; i < npos; i++) {
+            append_arg(cmdbuf, sizeof cmdbuf, pos[i]);
+            cmd_set = 1;
+        }
+    }
+    if (cmd_set)
+        cmd = cmdbuf;
+    else
+        cmd = NULL;
     if (cmd == NULL)
         interactive = 1;
 
-    snprintf(req, sizeof req, interactive && !cmd ? "SU %d -\n" : "SU %d %s\n",
-             uid, cmd ? cmd : "");
+    /* Two shapes for the same request.  `req` asks for the separated V2
+     * channels; `req1` is the original line, kept for daemons that predate V2
+     * (route 8's shell responder among them).  See the V2 comment above. */
+    if (cmd != NULL && strchr(cmd, '\n') == NULL && strlen(cmd) < 3800) {
+        snprintf(req, sizeof req, "XSU2 %d %s\n", uid, cmd);
+        snprintf(req1, sizeof req1, "SU %d %s\n", uid, cmd);
+    } else if (cmd != NULL) {
+        b64enc(cmd, b64);
+        snprintf(req, sizeof req, "XSU2B %d %s\n", uid, b64);
+        snprintf(req1, sizeof req1, "SUX %d %s\n", uid, b64);
+    } else {
+        snprintf(req, sizeof req, "XSU2 %d -\n", uid);
+        snprintf(req1, sizeof req1, "SU %d -\n", uid);
+    }
 
     /* @sud first: when the manager's relay is up (route 7 and route 8 both run it) the
      * connection is immediate.  Peer hand-off is only for a route where the daemon itself
@@ -339,6 +622,56 @@ int main(int argc, char **argv)
     if (!req_sent && write(fd, req, strlen(req)) < 0) {
         fprintf(stderr, "su: write request: %s\n", strerror(errno));
         return 127;
+    }
+    /* Does this daemon speak V2?  A daemon that knows XSU2 sends FRAME_READY
+     * before it forks, so this wait cannot mistake a slow command for an old
+     * daemon.  One that does not know the verb answers `ERR unknown request`
+     * immediately (it does not start with "SU", so nothing runs) and we resend
+     * in the original shape.  Resending is only safe precisely because a V2
+     * daemon has already answered READY by then. */
+    {
+        int v2 = 0;
+        struct pollfd p;
+        unsigned char b = 0;
+
+        p.fd = fd;
+        p.events = POLLIN;
+        if (poll(&p, 1, 5000) > 0 && recv(fd, &b, 1, MSG_PEEK) == 1 &&
+            b >= 1 && b <= 5)
+            v2 = 1;
+        if (v2) {
+            int retry = 0;
+            int code = relay_v2(fd, interactive, &retry);
+
+            close(fd);
+            if (retry) {
+                fd = peer_channel(req, 2000);
+                if (fd < 0)
+                    return 127;
+                code = relay_v2(fd, interactive, &retry);
+                close(fd);
+                if (retry) {
+                    fprintf(stderr, "su: daemon cannot attribute caller\n");
+                    return 127;
+                }
+            }
+            return code;
+        }
+        /* old daemon: redo the request in the shape it understands */
+        close(fd);
+        req_sent = 0;
+        fd = open_channel(&chan);
+        if (fd < 0) {
+            fd = peer_channel(req1, 1500);
+            if (fd >= 0)
+                req_sent = 1;
+        }
+        if (fd < 0)
+            return 127;
+        if (!req_sent && write(fd, req1, strlen(req1)) < 0) {
+            fprintf(stderr, "su: write request: %s\n", strerror(errno));
+            return 127;
+        }
     }
     /* A TCP caller has no attributable identity on the daemon's side: its socket
      * row is invisible there and only relayd callers carry a TOK.  When the
@@ -363,7 +696,7 @@ int main(int argc, char **argv)
             probe[pn] = 0;
             if (strncmp(probe, "ERR cannot attribute caller", 27) == 0) {
                 close(fd);
-                fd = peer_channel(req, 2000);
+                fd = peer_channel(req1, 2000);
                 if (fd < 0)
                     return 127;
                 req_sent = 1;

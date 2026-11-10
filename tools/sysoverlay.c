@@ -319,6 +319,20 @@ static int put_file(const char *mod_root, const char *rel, const char *target_ro
 	return 0;
 }
 
+/* The su client belongs to the root chain (Chain.openSuName7 -> nsmbind), not to a module.
+ * A module that ships its own su is either the Magisk wrapper -- which needs magiskd and a
+ * /data/adb runtime that this delivery does not keep -- or an older build whose protocol
+ * sud does not speak.  The module tree is published AFTER the chain, so without this skip
+ * the module's copy wins and every app that finds /system/xbin/su gets a client that cannot
+ * reach sud (measured 2026-11-10 08:05: 1098-byte wrapper pointing at a missing
+ * /data/local/tmp/magisk_rt/magisk, while /sbin/su answered fine). */
+static int is_su_path(const char *t)
+{
+    return !strcmp(t, "/sbin/su") || !strcmp(t, "/sbin/sux")
+        || !strcmp(t, "/system/bin/su") || !strcmp(t, "/system/bin/sux")
+        || !strcmp(t, "/system/xbin/su") || !strcmp(t, "/system/xbin/sux");
+}
+
 /* Recursively publish the module's files under `rel`. */
 static void overlay(const char *mod_root, const char *target_root, const char *rel, int depth)
 {
@@ -345,6 +359,10 @@ static void overlay(const char *mod_root, const char *target_root, const char *r
 
 		if (lstat(src, &sst) != 0)
 			continue;
+		if (is_su_path(target)) {
+			lg("  SKIP %s (the root chain owns this su client)\n", target);
+			continue;
+		}
 		if (S_ISDIR(sst.st_mode)) {
 			/* NEVER publish /system/lib or /system/lib64.
 			 * A tmpfs overlay here gives libc.so a new inode.  Zygote has
