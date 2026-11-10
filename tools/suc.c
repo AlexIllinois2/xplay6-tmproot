@@ -55,6 +55,12 @@ static int tcp_channel(void)
  * (which only relayd appends) or the peer hand-off below. */
 #define CH_UNIX 1
 #define CH_TCP 2
+/* @sud is the manager's relayd, not the daemon: it can only authorize from
+ * SO_PEERCRED and the caller's package, and on this ROM it cannot resolve a
+ * package line at all (hidepid=2 hides the caller's process tree from an app
+ * uid, and packages.list is system:package_info 0640).  Its refusal therefore
+ * says nothing about the daemon's own grant, so it is kept distinguishable. */
+#define CH_ABS 3
 
 /* Reverse-direction channel: WE listen, the daemon connects.  This is the only
  * shape that works on this device -- the daemon's domain cannot bind AF_UNIX and
@@ -152,12 +158,12 @@ static int peer_channel(const char *req, int timeout_ms)
     return csock;
 }
 
-static int open_channel(int *kind)
+static int open_channel(int *kind, int skip_abs)
 {
     const char *files[2] = { "/dev/.sud/sud.sock", "/data/local/tmp/.sud/sud.sock" };
     int i, fd;
 
-    for (i = 0; i < 3; i++) {
+    for (i = skip_abs ? 1 : 0; i < 3; i++) {
         struct sockaddr_un a;
 
         fd = socket(AF_UNIX, SOCK_STREAM, 0);
@@ -170,7 +176,7 @@ static int open_channel(int *kind)
             memcpy(a.sun_path + 1, "sud", 3);
             if (connect(fd, (struct sockaddr *) &a, sizeof(a.sun_family) + 1 + 3) == 0) {
                 if (kind != NULL)
-                    *kind = CH_UNIX;
+                    *kind = CH_ABS;
                 return fd;
             }
         } else {
@@ -610,8 +616,9 @@ int main(int argc, char **argv)
      * every call even when @sud was answering (measured 2026-10-23: 8 s per su, which is
      * what pushed Snub's foreground services past their 5 s startForeground deadline). */
     int req_sent = 0;
+    int skip_abs = 0;
 
-    fd = open_channel(&chan);
+    fd = open_channel(&chan, skip_abs);
     if (fd < 0) {
         fd = peer_channel(req, 1500);
         if (fd >= 0)
@@ -639,6 +646,42 @@ int main(int argc, char **argv)
         if (poll(&p, 1, 5000) > 0 && recv(fd, &b, 1, MSG_PEEK) == 1 &&
             b >= 1 && b <= 5)
             v2 = 1;
+        /* relayd's refusal is not the daemon's verdict.  On this ROM the relay cannot resolve
+         * a package line at all -- hidepid=2 hides the caller's process tree from its app uid
+         * and packages.list is system:package_info 0640 -- so a pkg grant the daemon itself
+         * would honor comes back as "ERR unknown service".  The daemon runs as root and its
+         * grant check is the authoritative one, so retry the same request on the channels
+         * that reach it directly instead of failing every app-side root call. */
+        if (!v2 && chan == CH_ABS) {
+            char err[32];
+            ssize_t en = recv(fd, err, sizeof err - 1, MSG_PEEK);
+
+            if (en > 0) {
+                err[en] = 0;
+                if (!strncmp(err, "ERR unknown service", 19)) {
+                    close(fd);
+                    skip_abs = 1;
+                    fd = open_channel(&chan, skip_abs);
+                    if (fd < 0) {
+                        fd = peer_channel(req, 1500);
+                        if (fd >= 0)
+                            req_sent = 1;
+                    }
+                    if (fd < 0)
+                        return 127;
+                    if (!req_sent && write(fd, req, strlen(req)) < 0) {
+                        fprintf(stderr, "su: write request: %s\n", strerror(errno));
+                        return 127;
+                    }
+                    memset(&p, 0, sizeof p);
+                    p.fd = fd;
+                    p.events = POLLIN;
+                    if (poll(&p, 1, 5000) > 0 && recv(fd, &b, 1, MSG_PEEK) == 1 &&
+                        b >= 1 && b <= 5)
+                        v2 = 1;
+                }
+            }
+        }
         if (v2) {
             int retry = 0;
             int code = relay_v2(fd, interactive, &retry);
@@ -660,7 +703,7 @@ int main(int argc, char **argv)
         /* old daemon: redo the request in the shape it understands */
         close(fd);
         req_sent = 0;
-        fd = open_channel(&chan);
+        fd = open_channel(&chan, skip_abs);
         if (fd < 0) {
             fd = peer_channel(req1, 1500);
             if (fd >= 0)

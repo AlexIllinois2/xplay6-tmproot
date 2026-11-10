@@ -95,6 +95,13 @@ static pid_t gp_ppid(pid_t pid)
     if (q == NULL)
         return 0;
     p = q + 1;
+    /* Fields after comm: state (one token), then ppid.  atoi() on the state
+     * token ("S", "R", ...) returned 0 for every process, so the parent walk
+     * stopped at the caller and an app's su child never reached the app. */
+    while (*p == ' ')
+        p++;
+    while (*p != 0 && *p != ' ')
+        p++;
     while (*p == ' ')
         p++;
     if (*p == 0)
@@ -118,6 +125,54 @@ static int gp_pid_is_package(pid_t pid, const char *pkg, int max_depth)
     return 0;
 }
 
+/* packages.list has "<package> <uid> <debuggable> ..." one entry per line.  The
+ * old fscanf("%255s %d") tried to parse the rest of the same line as a new
+ * name/uid pair, failed on the third column, and left the EOF-bound loop at
+ * the end of the first line -- so every package except the first line of the
+ * file was invisible to both fallbacks below.  Read whole lines instead. */
+static int gp_has_uid_file(const char *path, int uid, const char *pkg)
+{
+    char line[512], name[256];
+    int u;
+    FILE *f = fopen(path, "r");
+
+    if (f == NULL)
+        return 0;
+    while (fgets(line, sizeof line, f) != NULL) {
+        if (sscanf(line, "%255s %d", name, &u) == 2 && u == uid && !strcmp(name, pkg)) {
+            fclose(f);
+            return 1;
+        }
+    }
+    fclose(f);
+    return 0;
+}
+
+/* Fold every entry of path that belongs to uid into only/seen; returns 0 as soon
+ * as the uid is seen owning two different packages. */
+static int gp_fold_uid_file(const char *path, int uid, char *only, size_t cap, int *seen)
+{
+    char line[512], name[256];
+    int u;
+    FILE *f = fopen(path, "r");
+
+    if (f == NULL)
+        return 1;
+    while (fgets(line, sizeof line, f) != NULL) {
+        if (sscanf(line, "%255s %d", name, &u) != 2 || u != uid)
+            continue;
+        if (*seen && strcmp(only, name) != 0) {
+            fclose(f);
+            return 0;
+        }
+        if (!*seen)
+            snprintf(only, cap, "%s", name);
+        *seen = 1;
+    }
+    fclose(f);
+    return 1;
+}
+
 /* Sweep path: no pid is available, so fall back to "does this uid own this package
  * in any user's package list".  This is deliberately only used for revocation of
  * live sessions -- a fresh request always has a pid and gets the stricter check. */
@@ -125,26 +180,8 @@ static int gp_uid_has_package(int uid, const char *pkg)
 {
     char path[256];
     DIR *d;
-    int hit = 0;
 
-    snprintf(path, sizeof path, "/data/system/packages.list");
-    {
-        FILE *f = fopen(path, "r");
-
-        if (f != NULL) {
-            char name[256];
-            int u;
-
-            while (fscanf(f, "%255s %d", name, &u) == 2) {
-                if (u == uid && !strcmp(name, pkg)) {
-                    hit = 1;
-                    break;
-                }
-            }
-            fclose(f);
-        }
-    }
-    if (hit)
+    if (gp_has_uid_file("/data/system/packages.list", uid, pkg))
         return 1;
     d = opendir("/data/system/users");
     if (d == NULL)
@@ -153,29 +190,17 @@ static int gp_uid_has_package(int uid, const char *pkg)
         struct dirent *e;
 
         while ((e = readdir(d)) != NULL) {
-            FILE *f;
-            char name[256];
-            int u;
-
             if (e->d_name[0] < '0' || e->d_name[0] > '9')
                 continue;
             snprintf(path, sizeof path, "/data/system/users/%s/packages.list", e->d_name);
-            f = fopen(path, "r");
-            if (f == NULL)
-                continue;
-            while (fscanf(f, "%255s %d", name, &u) == 2) {
-                if (u == uid && !strcmp(name, pkg)) {
-                    hit = 1;
-                    break;
-                }
+            if (gp_has_uid_file(path, uid, pkg)) {
+                closedir(d);
+                return 1;
             }
-            fclose(f);
-            if (hit)
-                break;
         }
     }
     closedir(d);
-    return hit;
+    return 0;
 }
 
 /* Fallback for a caller whose parent chain was severed (a double-forked helper has
@@ -186,27 +211,11 @@ static int gp_uid_package_unique(int uid, const char *pkg)
 {
     char path[256];
     char only[256] = "";
-    char name[256];
-    int seen = 0, u;
-    FILE *f;
+    int seen = 0;
     DIR *d;
 
-    snprintf(path, sizeof path, "/data/system/packages.list");
-    f = fopen(path, "r");
-    if (f != NULL) {
-        while (fscanf(f, "%255s %d", name, &u) == 2) {
-            if (u != uid)
-                continue;
-            if (seen && strcmp(only, name) != 0) {
-                fclose(f);
-                return 0;
-            }
-            if (!seen)
-                snprintf(only, sizeof only, "%s", name);
-            seen = 1;
-        }
-        fclose(f);
-    }
+    if (!gp_fold_uid_file("/data/system/packages.list", uid, only, sizeof only, &seen))
+        return 0;
     d = opendir("/data/system/users");
     if (d != NULL) {
         struct dirent *e;
@@ -215,22 +224,10 @@ static int gp_uid_package_unique(int uid, const char *pkg)
             if (e->d_name[0] < '0' || e->d_name[0] > '9')
                 continue;
             snprintf(path, sizeof path, "/data/system/users/%s/packages.list", e->d_name);
-            f = fopen(path, "r");
-            if (f == NULL)
-                continue;
-            while (fscanf(f, "%255s %d", name, &u) == 2) {
-                if (u != uid)
-                    continue;
-                if (seen && strcmp(only, name) != 0) {
-                    fclose(f);
-                    closedir(d);
-                    return 0;
-                }
-                if (!seen)
-                    snprintf(only, sizeof only, "%s", name);
-                seen = 1;
+            if (!gp_fold_uid_file(path, uid, only, sizeof only, &seen)) {
+                closedir(d);
+                return 0;
             }
-            fclose(f);
         }
         closedir(d);
     }

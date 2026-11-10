@@ -647,6 +647,9 @@ public final class Main extends Activity {
         Collections.sort(filtered, new Comparator<Chain.Entry>() {
             @Override
             public int compare(Chain.Entry a, Chain.Entry b) {
+                boolean ga = checked.contains(a.pkg), gb = checked.contains(b.pkg);
+                if (ga != gb)
+                    return ga ? -1 : 1;
                 return a.label.compareToIgnoreCase(b.label);
             }
         });

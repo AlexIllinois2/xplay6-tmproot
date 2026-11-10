@@ -60,6 +60,10 @@
 
 su 服务在客户端以 `XSU2 ...` / `XSU2B ...` 开头时按帧回复：`[1 字节类型][4 字节大端长度][负载]`，1 = stdout，2 = stderr，3 = 退出码，4 = ready，5 = retry。stdout 与 stderr 分路，这是 libsu 的 `ShellImpl` 的要求：它等两条流上都出现 UUID 标记，合并成一条流就会被判成“无 root”。普通 `SU ...` 客户端仍得到旧的合并流，逐字节不变。
 
+链路就绪后，管理端还会以应用 uid（10132）运行 `relayd`，由它持有抽象套接字 `@sud` 并带上 manager 的 token 转发给守护进程。但在本 ROM 上，这个中继无法替其他应用解析 `pkg` 授权行：`/proc` 以 `hidepid=2` 挂载，uid 10132 读不到别的应用的 `cmdline`/`stat`；`/data/system/packages.list` 又是 `-rw-r----- system:package_info`，同样读不了。于是它对这类调用一律回 `ERR unknown service`。`suc` 把该应答理解为“这个中继看不到我”，而不是守护进程的判决，会改走文件套接字、再走 TCP 12346：那里 `sud` 以 root 运行，两处来源都读得到，并用同一份授权名单判定。没有这个回退时，只要中继在跑，应用侧每次 root 调用都会失败，依赖 libsu 的应用（例如 DataBackup）会在启动五分钟后退出。
+
+授权判定本身还有两个解析 bug，在直连通道上也会给出同样的 `deny` 现象。`gp_ppid()` 跳过了括号里的进程名后直接把 `state` 字段（`S`、`R` 等）交给 `atoi()`，而它对任何进程都是 0，于是父进程遍历停在调用者本身，应用的 `su` 子进程永远走不到以包名运行的那个进程；`packages.list` 的回退解析用的是 `fscanf("%255s %d")` 循环，它会把同一行剩余内容当成新的一对名字/uid 继续解析，在第三列失败后停在文件末尾，导致除第一行之外的包全部不可见。现在 `gp_ppid()` 先跳过 state 字段再读 ppid，`packages.list` 改为按行读取（`fgets` + `sscanf`）；共享 uid 与多用户/克隆副本也正是靠这一点才能正确匹配。
+
 ## 构建
 
 要求（见 [README-build.txt](file:///home/v/.local/project/xplay6/xplay6-tmproot/README-build.txt)）：
