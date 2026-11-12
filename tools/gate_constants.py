@@ -60,6 +60,17 @@ MAP = {
         ("KALLSYMS_HPGAIN_NEXT", "HPGAIN7_NEXT_VA", "va"),
         ("KALLSYMS_RELEASE", "HPGAIN7_RELEASE", "str"),
     ],
+    "8.19.16": [
+        # route 8's headphone-gain arm, same rule as profile "7": the authority is the recovered
+        # kallsyms table for this build (art/kallsyms-8-real.txt, recovered from the kernel Image
+        # in the 9008 backup -- modprobe literal anchor, name-set equality against the device dump,
+        # first-name _text), because `wcd_hph_gain` is a data symbol no gate site refers to.
+        # This profile is kall-only: pgdalias has no answer here and the route-8 chain carries no
+        # gate-site constants of its own (selinux symbols are stripped from this build's table).
+        ("KALLSYMS_HPGAIN_VA", "HPGAIN8_VA", "va"),
+        ("KALLSYMS_HPGAIN_NEXT", "HPGAIN8_NEXT_VA", "va"),
+        ("KALLSYMS_RELEASE", "HPGAIN8_RELEASE", "str"),
+    ],
 }
 DESC_LIT = "0x0040000040000711ULL"        # the same descriptor literal, in both routes' C code
 
@@ -68,6 +79,9 @@ KALL = {
     "7": {"file": "art/kallsyms-7-real.txt", "release": "3.18.31-perf-g9dce1fbc9",
           "syms": {"KALLSYMS_HPGAIN_VA": "wcd_hph_gain",
                    "KALLSYMS_HPGAIN_NEXT": "soc_codec_dev_tasha"}},
+    "8.19.16": {"file": "art/kallsyms-8-real.txt", "release": "3.18.71-perf-g8a8c60dd",
+                "syms": {"KALLSYMS_HPGAIN_VA": "wcd_hph_gain",
+                         "KALLSYMS_HPGAIN_NEXT": "soc_codec_dev_tasha"}},
 }
 
 
@@ -281,6 +295,8 @@ def check(src, label):
     for profile, pairs in MAP.items():
         if profile == "6.0.1-1712":
             kv = derive_1712()
+        elif profile == "8.19.16":
+            kv = kall_kv(profile)
         else:
             kv = derive(profile)
             kv.update(kall_kv(profile))
@@ -298,19 +314,22 @@ def check(src, label):
         if "KALLSYMS_SPAN" in kv:
             # the length the CLI writes must fit between the array and the object next to it
             n += 1
-            ln = re.search(r"#define\s+HPGAIN7_LEN\s+(\d+)", src)
+            lenname = "HPGAIN8_LEN" if profile == "8.19.16" else "HPGAIN7_LEN"
+            ln = re.search(r"#define\s+%s\s+(\d+)" % lenname, src)
             if not ln:
-                raise SystemExit("gate: HPGAIN7_LEN is no longer a #define in clobber.c -- the bound "
-                                 "rule lost the length it guards")
+                raise SystemExit("gate: %s is no longer a #define in clobber.c -- the bound "
+                                 "rule lost the length it guards" % lenname)
             span, want = kv["KALLSYMS_SPAN"], int(ln.group(1))
             if want > span:
-                bad.append("%-3s %-16s HPGAIN7_LEN=%d exceeds span %#x to soc_codec_dev_tasha"
-                           % (profile, "HPGAIN7_LEN", want, span))
-                print("  BAD profile %s  %-18s len=%d > span=%#x" % (profile, "HPGAIN7_LEN", want, span))
+                bad.append("%-3s %-16s %s=%d exceeds span %#x to soc_codec_dev_tasha"
+                           % (profile, lenname, lenname, want, span))
+                print("  BAD profile %s  %-18s len=%d > span=%#x" % (profile, lenname, want, span))
             else:
                 print("  ok  profile %s  %-18s len=%d fits span=%#x to the next object"
-                      % (profile, "HPGAIN7_LEN", want, span))
+                      % (profile, lenname, want, span))
         # the descriptor literal, which appears in the C code rather than as a #define
+        if "ALIAS_DESC_HEX" not in kv:
+            continue                                  # kall-only profiles carry no descriptor
         d = int.from_bytes(bytes.fromhex(kv["ALIAS_DESC_HEX"]), "little")
         n += 1                                  # the denominator counts attempted pairs, not passed ones
         if DESC_LIT not in src:

