@@ -529,11 +529,15 @@ public final class Chain {
               + "R=/data/local/tmp/.sur8\n"
               + "SUC=\"" + su.getAbsolutePath() + "\"\n"
               /* A second chain run in the same boot must not rebuild from a mirror.  The marker is
-               * only reachable through OUR bind at the target path (it disappears on reboot), and it
-               * is versioned so an old build's /sbin-only mirror gets the new paths added instead of
-               * short-circuiting this one. */
-              + "[ -f /sbin/.r8mirror3 ] && [ -f /system/bin/.r8mirror3 ] "
-              + "&& { echo 'MIRROR8 already active'; exit 0; }\n"
+               * only reachable through OUR bind at the target path (it disappears on reboot).
+               * v1.9.41 regressed by mirroring /system/bin and /system/xbin: a stage_dir with a
+               * missed per-file bind+cp left a 0-byte placeholder for sh, the whole-tree bind
+               * then shadowed /system/bin and adbd died with `exec /system/bin/sh: Permission
+               * denied` until reboot (measured 2026-11-12).  This build restores the /sbin-only
+               * mirror, which every 8.19.16 build before 1.9.41 already proved sufficient, and
+               * adds a hole guard: any per-file bind+cp failure aborts the stage_dir before the
+               * whole-tree bind, so a hole can never reach the target path. */
+              + "[ -f /sbin/.r8mirror3 ] && { echo 'MIRROR8 already active'; exit 0; }\n"
               /* Never rm -rf this tree: a previous attempt that bound /system/bin but failed on
                * /sbin leaves live mounts inside it, and rebuilding over them would mirror the mirror. */
               + "mkdir -p \"$R\" || exit 1\n"
@@ -551,11 +555,13 @@ public final class Chain {
                * exactly what we deliver, and an older placeholder would shadow our client. */
               + "    case \"$n\" in su|sux|.su-client|.r8mirror|.r8mirror3) continue;; esac\n"
               + "    if [ -d \"$f\" ]; then\n"
-              + "      mkdir -p \"$r/$n\"; $T mount --bind \"$f\" \"$r/$n\" 2>/dev/null; continue\n"
+              + "      mkdir -p \"$r/$n\"; $T mount --bind \"$f\" \"$r/$n\" 2>/dev/null || "
+              + "{ echo \"HOLE8: $d/$n\"; return 1; }; continue\n"
               + "    fi\n"
               + "    : > \"$r/$n\" || continue\n"
               + "    $T mount --bind \"$f\" \"$r/$n\" 2>/dev/null "
-              + "|| { rm -f \"$r/$n\"; cp -p \"$f\" \"$r/$n\" 2>/dev/null; }\n"
+              + "|| { rm -f \"$r/$n\"; cp -p \"$f\" \"$r/$n\" 2>/dev/null || "
+              + "{ echo \"HOLE8: $d/$n\"; return 1; }; }\n"
               + "  done\n"
               + "  cp \"$SUC\" \"$r/.su-client\" || return 1\n"
               + "  chmod 0755 \"$r/.su-client\"\n"
@@ -578,20 +584,18 @@ public final class Chain {
               + "  $T mount --bind \"$r\" \"$tgt\" || { echo \"MIRROR8 bind failed: $d\"; return 1; }\n"
               + "  echo \"MIRROR8 ok: $d\"\n"
               + "}\n"
-              + "stage_dir /system/bin\n"
-              + "stage_dir /system/xbin\n"
               + "stage_dir /sbin\n"
-              + "ls -l /system/bin/su /system/xbin/su /sbin/su 2>&1\n"
+              + "ls -l /sbin/su 2>&1\n"
               + "printf 'su -v: '; su -v 2>&1\n"
               + "printf 'su -V: '; su -V 2>&1\n";
         if (!writeScript(log, m, script))
             return;
         log.line("  mirror su paths: " + trim1(root("sh " + m.getAbsolutePath())));
         log.line("  PATH witness: " + trim1(root(
-                "sh -c 'command -v su; command -v sux; ls -l /system/bin/su /system/xbin/su "
-                + "/sbin/su 2>&1 | tail -3; su -v'")));
+                "sh -c 'command -v su; command -v sux; ls -l /sbin/su 2>&1; su -v'")));
         log.line("  note: esc8 patched the name gate, so granted apps can call `su` (sux kept "
-                + "as fallback for boots where `su` ran before the patch)");
+                + "as fallback for boots where `su` ran before the patch); the mirror is /sbin-only "
+                + "by design -- a hole in a /system/bin mirror once killed adb until reboot");
     }
 
     /** Does vivo's exec guard on the *name* `su` also bite an app-domain caller?
